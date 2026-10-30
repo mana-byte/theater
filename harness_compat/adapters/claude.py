@@ -6,6 +6,7 @@ import json
 
 from ..mock.provisioning import (
     CompatManifest,
+    HookProbe,
     McpDiscovery,
     NativeEdit,
     ProvisionContext,
@@ -67,6 +68,14 @@ COMPAT = CompatManifest(
     # Behind ANTHROPIC_BASE_URL (the mock) Claude defers MCP tools until a search loads one.
     mcp_discovery=McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"}),
     canaries=("launch-files-dropped",),
+    hook_events={
+        "native-hooks/PreToolUse": HookProbe(
+            "Bash",
+            {"command": "while ! test -f {release}; do sleep 0.05; done; printf compat-hook"},
+        ),
+        "native-hooks/PostToolUse": HookProbe("Bash", {"command": "printf compat-hook"}),
+        "native-hooks/PostToolUseFailure": HookProbe("Bash", {"command": "exit 1"}),
+    },
 )
 
 

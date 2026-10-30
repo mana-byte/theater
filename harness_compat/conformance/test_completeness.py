@@ -18,11 +18,13 @@ from harness_compat.support.coverage import COVERAGE, NoLive
 from harness_compat.support.declarations import declarations
 from harness_compat.support.mutations import MUTATIONS
 from harness_compat.support.obligations import FAMILIES, document, required
+from tests.support.hook_channel_rig import hook_manifest
 from tests.support.manifest_rig import manifest, plan
 from theater.harness import HARNESSES
 from theater.harness.builtin import plugin_dir
 from theater.harness.contracts.manifest import (
     ControlManifest,
+    HookChannelManifest,
     InterruptPlan,
     LaunchManifest,
     McpRenderingManifest,
@@ -97,6 +99,51 @@ def test_the_shipped_plugins_are_all_discovered() -> None:
 @pytest.mark.parametrize("name", SHIPPED)
 def test_adapter_canaries_exist_in_the_generic_catalogue(name: str) -> None:
     assert set(load_adapter(name).compat.canaries) <= {mutation.name for mutation in MUTATIONS}
+
+
+@pytest.mark.parametrize("name", SHIPPED)
+def test_each_enabled_hook_event_has_an_adapter_stimulus(name: str) -> None:
+    events = {
+        f"{channel.declaration.id}/{binding.event}"
+        for channel in HARNESSES[name].observer.enrichment_manifests()
+        if isinstance(channel, HookChannelManifest) and channel.unavailable_reason is None
+        for binding in channel.bindings
+    }
+    assert set(load_adapter(name).compat.hook_events) == events
+
+
+def test_hook_events_add_independent_obligations_without_removing_the_tool_check() -> None:
+    base = hook_manifest()
+    channel = base.observation.hook_channels[0]
+    added = tuple(
+        replace(channel.bindings[0], event=event) for event in ("prompt.submit", "turn.stop")
+    )
+    enabled = replace(
+        base,
+        observation=replace(
+            base.observation, enrichments=(replace(channel, bindings=(*channel.bindings, *added)),)
+        ),
+    )
+    original = {item.id for item in required(compile_manifest("acme", base))}
+    extended = {item.id for item in required(compile_manifest("acme", enabled))}
+    assert {"channels:native-hooks", "channels:native-hooks/tool.finished"} <= original
+    assert extended - original == {
+        "channels:native-hooks/prompt.submit",
+        "channels:native-hooks/turn.stop",
+    }
+    assert original <= extended
+    disabled = replace(
+        base,
+        observation=replace(
+            base.observation,
+            enrichments=(
+                replace(channel, bindings=(), installer=None, unavailable_reason="not proven"),
+            ),
+        ),
+    )
+    assert not any(
+        item.family == "channels" for item in required(compile_manifest("acme", disabled))
+    )
 
 
 def test_every_declaration_a_manifest_can_make_is_mapped_or_exempted() -> None:

@@ -11,11 +11,13 @@ from harness_compat.mock.provisioning import (
     TOOL_NAME_MAX_CHARS,
     TOOL_PAYLOAD_MAX_CHARS,
     CompatManifest,
+    HookProbe,
     McpCall,
     McpDiscovery,
     NativeEdit,
     ProvisionContext,
     Provisioned,
+    ToolTemplate,
 )
 
 
@@ -57,6 +59,36 @@ def test_provisioned_rejects_an_unknown_protocol() -> None:
         Provisioned(protocol="gemini")
 
 
+def test_hook_stimuli_freeze_calls_and_preserve_plain_prompt_selection() -> None:
+    payload = {"command": "true"}
+    events = {"native/start": HookProbe("Bash", payload), "native/stop": None}
+    compat = CompatManifest(provision=provision, hook_events=events)
+    payload["command"] = "different"
+    events.clear()
+    assert compat.hook_events["native/start"].payload == {"command": "true"}
+    assert compat.hook_events["native/stop"] is None
+    with pytest.raises(TypeError):
+        compat.hook_events["native/stop"] = HookProbe("Bash", {})
+    with pytest.raises(TypeError):
+        compat.hook_events["native/start"].payload["command"] = "different"
+
+
+def test_static_payloads_preserve_literal_braces_and_hook_gate_is_explicit() -> None:
+    literal = {"command": "printf '{}'", "nested": [{"value": "{path}"}]}
+    template = ToolTemplate("Bash", literal)
+    assert template.placeholders == frozenset()
+    assert template.size > 0
+    probe = HookProbe("Bash", literal)
+    assert probe.render(release="marker") == {
+        "command": "printf '{}'",
+        "nested": ({"value": "{path}"},),
+    }
+    assert probe.placeholders == frozenset()
+    gate = HookProbe("Bash", {"command": "test -f {release}"})
+    assert gate.render(release="'a b'") == {"command": "test -f 'a b'"}
+    assert gate.placeholders == {"release"}
+
+
 @pytest.mark.parametrize(
     ("declare", "message"),
     [
@@ -76,6 +108,13 @@ def test_provisioned_rejects_an_unknown_protocol() -> None:
             id="route-relative-path",
         ),
         pytest.param(lambda: NativeEdit(" ", "{path}"), "non-blank", id="blank-name"),
+        pytest.param(
+            lambda: CompatManifest(
+                provision=provision, hook_events={"native/start": HookProbe(" ", {})}
+            ),
+            "non-blank",
+            id="hook-stimulus-blank-name",
+        ),
         pytest.param(
             lambda: NativeEdit("w" * (TOOL_NAME_MAX_CHARS + 1), "{path}"),
             f"at most {TOOL_NAME_MAX_CHARS}",

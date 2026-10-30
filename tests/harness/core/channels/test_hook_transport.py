@@ -172,6 +172,10 @@ async def test_hook_transport_credentials_bounds_decode_and_cleanup(  # noqa: PL
         assert native_duplicate == {"ok": True, "duplicate": False, "dropped": False}
         assert overflow == {"ok": True, "duplicate": False, "dropped": True}
         assert wakes == [participant.id, participant.id]
+        deliveries = [
+            row for row in daemon.store.bus_tail(limit=100) if row["kind"] == "agent.harness_event"
+        ]
+        assert [row["payload"]["native_id"] for row in deliveries] == ["one", "one", "two"]
         rows = await client.call("harnesses")
         row = next(row for row in rows if row["name"] == "acme")
         runtime = row["runtime"]

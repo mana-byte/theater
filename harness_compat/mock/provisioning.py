@@ -105,9 +105,19 @@ class ToolTemplate:
 
     def _render(self, values: Mapping[str, str]) -> str | Mapping[str, object]:
         """Substitute the tokens in one pass; no other interpolation happens."""
-        rendered = _substitute(self.payload, _pattern(self.TOKENS), values)
+        rendered = render_payload(self.payload, values)
         assert isinstance(rendered, (str, Mapping))
         return rendered
+
+
+@dataclass(frozen=True, slots=True)
+class HookProbe(ToolTemplate):
+    """A hook stimulus; {release} is a shell-quoted marker path for an optional tool gate."""
+
+    TOKENS: ClassVar[tuple[str, ...]] = ("release",)
+
+    def render(self, *, release: str) -> str | Mapping[str, object]:
+        return self._render({"release": release})
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +174,7 @@ def _freeze(value: object) -> object:
 
 @functools.cache
 def _pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
-    return re.compile(r"\{(" + "|".join(map(re.escape, tokens)) + r")\}")
+    return re.compile(r"\{(" + "|".join(map(re.escape, tokens)) + r")\}" if tokens else r"(?!)")
 
 
 def _scan(value: object, pattern: re.Pattern[str], found: set[str]) -> None:
@@ -178,13 +188,14 @@ def _scan(value: object, pattern: re.Pattern[str], found: set[str]) -> None:
             _scan(item, pattern, found)
 
 
-def _substitute(value: object, pattern: re.Pattern[str], values: Mapping[str, str]) -> object:
+def render_payload(value: object, values: Mapping[str, str] = MappingProxyType({})) -> object:
+    """Thaw structured payloads and replace only explicitly supplied tokens."""
     if isinstance(value, str):
-        return pattern.sub(lambda match: values[match.group(1)], value)
+        return _pattern(tuple(values)).sub(lambda match: values[match.group(1)], value)
     if isinstance(value, Mapping):
-        return {key: _substitute(item, pattern, values) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return tuple(_substitute(item, pattern, values) for item in value)
+        return {key: render_payload(item, values) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return tuple(render_payload(item, values) for item in value)
     return value
 
 
@@ -213,8 +224,11 @@ class CompatManifest:
     canaries: tuple[str, ...] = ()
     #: Non-model HTTP routes the mock acknowledges with 204, without consuming a reply.
     acknowledged_routes: tuple[tuple[str, str], ...] = ()
+    #: Per declared channel/event: a native tool stimulus, or None for a plain prompt turn.
+    hook_events: Mapping[str, HookProbe | None] = MappingProxyType({})
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "hook_events", MappingProxyType(dict(self.hook_events)))
         if len(set(self.canaries)) != len(self.canaries):
             raise ValueError("canaries must name each mutation once")
         for method, path in self.acknowledged_routes:

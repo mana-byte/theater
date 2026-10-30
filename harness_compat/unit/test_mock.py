@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from harness_compat.contract import MOCK_REPLY, MockReply, MockToolCall
+from harness_compat.mock.provisioning import ToolTemplate
 from harness_compat.mock.server import MockServer
 
 
@@ -66,6 +67,60 @@ def test_a_call_can_carry_its_own_id_instead_of_the_positional_one(tmp_path: Pat
         assert json.loads(payload)["content"][1]["id"] == "own-id"
         _, payload = _request(f"{root}/v1/messages", {"stream": True})
         assert _sse_data(payload)[4]["content_block"]["id"] == "own-id"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("protocol", "stream"),
+    [
+        ("anthropic", False),
+        ("anthropic", True),
+        ("openai-chat", False),
+        ("openai-chat", True),
+        ("openai-responses", True),
+    ],
+)
+def test_frozen_nested_arguments_serialize_on_each_wire(tmp_path, protocol, stream):
+    arguments = {"nested": [{"value": "{}", "numbers": [1, 2]}]}
+    frozen = ToolTemplate("lookup", arguments).payload
+    with MockServer(tmp_path / "requests.jsonl") as server:
+        server.queue(protocol, MockReply("nested", (MockToolCall("lookup", frozen),)))
+        routes = {
+            "anthropic": "/v1/messages",
+            "openai-chat": "/v1/chat/completions",
+            "openai-responses": "/v1/responses",
+        }
+        origin = server.base_urls["anthropic"]
+        status, payload = _request(origin + routes[protocol], {"stream": stream})
+        assert status == 200
+        if protocol == "anthropic":
+            if stream:
+                chunks = _sse_data(payload)
+                encoded = "".join(
+                    chunk.get("delta", {}).get("partial_json", "") for chunk in chunks
+                )
+                actual = json.loads(encoded)
+            else:
+                actual = json.loads(payload)["content"][1]["input"]
+        elif protocol == "openai-chat":
+            if stream:
+                encoded = "".join(
+                    call["function"].get("arguments", "")
+                    for chunk in _sse_data(payload)
+                    for call in chunk["choices"][0].get("delta", {}).get("tool_calls", [])
+                )
+            else:
+                encoded = json.loads(payload)["choices"][0]["message"]["tool_calls"][0]["function"][
+                    "arguments"
+                ]
+            actual = json.loads(encoded)
+        else:
+            item = next(
+                chunk["item"]
+                for chunk in _sse_data(payload)
+                if chunk.get("item", {}).get("type") == "function_call"
+            )
+            actual = json.loads(item["arguments"])
+        assert actual == arguments
 
 
 def test_queued_tool_calls_cover_protocol_shapes_and_unknown_accounting(tmp_path: Path) -> None:
