@@ -134,7 +134,7 @@ async def _harness_event(daemon, params: dict) -> dict:
     )
     if not result.duplicate and not result.dropped:
         daemon.observer.live.wake(request.pid)
-    _publish_hook_event(daemon, request, result)
+    _publish_hook_event(daemon, request, result, native_id)
     return {"ok": True, "duplicate": result.duplicate, "dropped": result.dropped}
 
 
@@ -209,7 +209,7 @@ def _validate_payload(params: dict, channel: HookChannelManifest) -> dict[str, o
         raise BadRequest(str(exc)) from exc
 
 
-def _publish_hook_event(daemon, request: _HookRequest, result) -> None:
+def _publish_hook_event(daemon, request: _HookRequest, result, native_id: str) -> None:
     if not result.duplicate:
         daemon.store.bus_append(
             BUS_KIND_AGENT_HARNESS_EVENT,
@@ -217,6 +217,7 @@ def _publish_hook_event(daemon, request: _HookRequest, result) -> None:
             payload={
                 "channel": request.channel_id,
                 "event": request.event,
+                "native_id": native_id,
                 "dropped": result.dropped,
             },
         )

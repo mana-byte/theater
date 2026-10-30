@@ -157,6 +157,10 @@ COVERAGE: Mapping[str, Coverage] = _merge(
         "HookBinding.delivery=RETRIED",
         "HookBinding.correlation",
         "HookBinding.decoder",
+        "CompatManifest.hook_events",
+        "MockToolCall.name",
+        "MockToolCall.arguments",
+        "MockToolCall.call_id",
     ),
     _exempt(
         "available OTel channels have no live payload scenario and make qualification "

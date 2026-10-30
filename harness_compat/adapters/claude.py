@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from ..contract import MockToolCall
 from ..mock.provisioning import (
     CompatManifest,
     McpDiscovery,
@@ -67,6 +68,11 @@ COMPAT = CompatManifest(
     # Behind ANTHROPIC_BASE_URL (the mock) Claude defers MCP tools until a search loads one.
     mcp_discovery=McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"}),
     canaries=("launch-files-dropped",),
+    hook_events={
+        "native-hooks/PreToolUse": MockToolCall("Bash", {"command": "printf compat-hook"}),
+        "native-hooks/PostToolUse": MockToolCall("Bash", {"command": "printf compat-hook"}),
+        "native-hooks/PostToolUseFailure": MockToolCall("Bash", {"command": "exit 1"}),
+    },
 )
 
 

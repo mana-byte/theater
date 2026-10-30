@@ -61,12 +61,18 @@ def _flag(name: str, present: Callable[[Harness], bool]) -> Callable[[Harness], 
 
 
 def _channels(harness: Harness) -> tuple[str, ...]:
-    return tuple(
-        enrichment.declaration.id
-        for enrichment in harness.observer.enrichment_manifests()
-        if isinstance(enrichment, (HookChannelManifest, OtelChannelManifest))
-        and enrichment.unavailable_reason is None
-    )
+    details = []
+    for channel in harness.observer.enrichment_manifests():
+        if not isinstance(channel, (HookChannelManifest, OtelChannelManifest)):
+            continue
+        if channel.unavailable_reason is not None:
+            continue
+        details.append(channel.declaration.id)
+        if isinstance(channel, HookChannelManifest):
+            details.extend(
+                f"{channel.declaration.id}/{binding.event}" for binding in channel.bindings
+            )
+    return tuple(details)
 
 
 def _interrupt(harness: Harness) -> bool:

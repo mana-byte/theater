@@ -198,6 +198,11 @@ search tool and a payload that loads one MCP tool; it must contain `{tool}` and 
 contain `{server}`. The suite runs it before the tool's own call, which it then makes by the
 name the CLI offers afterwards (or through `mcp_call`).
 
+`CompatManifest.hook_events` maps every enabled `channel/event` binding to a static
+`MockToolCall` stimulus, or `None` for a plain prompt turn. Each binding gets an independent
+obligation alongside the channel's existing tool-correlation check. The event oracle joins its
+accepted bus delivery's native id to a new projected fact; another event cannot satisfy it.
+
 `CompatManifest.canaries` names extra generic mutations that this adapter's provisioning cannot
 mask. The mutation implementations and assertions stay in the shared suite. These tooling checks
 run separately from release qualification; no shared code branches on a harness name.

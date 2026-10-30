@@ -81,7 +81,7 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
     mark = _mark(live)
 
     async def not_gated() -> None:
-        _check_fit(live, prompt, effect)
+        check_tool_fit(live, prompt, effect.call)
         if not effect.happened() and (await live.reading(participant)).kind is ScreenKind.APPROVAL:
             shown = "\n".join((await live.screen(participant)).splitlines()[-8:])
             violation(
@@ -90,7 +90,7 @@ async def expect_runs(live: LiveRig, participant: str, effect: Effect) -> None:
 
     job = await live.send(participant, prompt, guard=not_gated)
 
-    _check_fit(live, prompt, effect)
+    check_tool_fit(live, prompt, effect.call)
     assert job.state == "done", job.error
     assert final in str(job.result)
     assert effect.happened(), "the tool call finished without leaving its effect"
@@ -105,14 +105,14 @@ async def expect_gated(live: LiveRig, participant: str, effect: Effect) -> None:
     handle = await live.submit(participant, prompt)
 
     async def still_waiting() -> None:
-        _check_fit(live, prompt, effect)
+        check_tool_fit(live, prompt, effect.call)
         job = (await live.client.jobs.get(handle)).value
         if job.state != "running":
             violation(f"the turn ended ({job.state}) before its tool met an approval: {job.error}")
 
     await live.expect_screen(participant, ScreenKind.APPROVAL, guard=still_waiting)
 
-    _check_fit(live, prompt, effect)
+    check_tool_fit(live, prompt, effect.call)
     await asyncio.sleep(GATE_SETTLE_SECONDS)
     assert not effect.happened(), "the tool ran while its approval prompt was open"
     assert not _received(live, mark), (
@@ -134,7 +134,7 @@ def _received(live: LiveRig, mark: tuple[int, set[str | None]]) -> bool:
     )
 
 
-def _check_fit(live: LiveRig, prompt: str, effect: Effect) -> None:
+def check_tool_fit(live: LiveRig, prompt: str, call: MockToolCall) -> None:
     """Before any outcome is judged: the scripted call must fit the tool the CLI offered.
 
     Theater does not choose a CLI's tool schemas, so a misfit means the plugin's recipe is stale:
@@ -143,10 +143,10 @@ def _check_fit(live: LiveRig, prompt: str, effect: Effect) -> None:
     """
     if not (requests := live.turns(prompt)):
         return
-    problem = _misfit(requests[0], effect.call)
+    problem = _misfit(requests[0], call)
     if problem is not None:
         inconclusive(
-            f"the plugin's recipe for {effect.call.name!r} does not fit the CLI's tool: {problem}"
+            f"the plugin's recipe for {call.name!r} does not fit the CLI's tool: {problem}"
         )
 
 
@@ -230,6 +230,7 @@ def _contains(path: Path, text: str) -> bool:
 
 __all__ = [
     "Effect",
+    "check_tool_fit",
     "edit_effect",
     "expect_gated",
     "expect_runs",
