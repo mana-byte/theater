@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 
-from ..contract import MockToolCall
 from ..mock.provisioning import (
     CompatManifest,
+    HookProbe,
     McpDiscovery,
     NativeEdit,
     ProvisionContext,
@@ -69,9 +69,12 @@ COMPAT = CompatManifest(
     mcp_discovery=McpDiscovery("ToolSearch", {"query": "select:mcp__{server}__{tool}"}),
     canaries=("launch-files-dropped",),
     hook_events={
-        "native-hooks/PreToolUse": MockToolCall("Bash", {"command": "printf compat-hook"}),
-        "native-hooks/PostToolUse": MockToolCall("Bash", {"command": "printf compat-hook"}),
-        "native-hooks/PostToolUseFailure": MockToolCall("Bash", {"command": "exit 1"}),
+        "native-hooks/PreToolUse": HookProbe(
+            "Bash",
+            {"command": "while ! test -f {release}; do sleep 0.05; done; printf compat-hook"},
+        ),
+        "native-hooks/PostToolUse": HookProbe("Bash", {"command": "printf compat-hook"}),
+        "native-hooks/PostToolUseFailure": HookProbe("Bash", {"command": "exit 1"}),
     },
 )
 

@@ -26,6 +26,7 @@ from ..contract import (
     Route,
     ToolShape,
 )
+from .provisioning import render_payload
 
 #: Routes the mock answers; anything else gets UNHANDLED_STATUS and is recorded as unhandled.
 HANDLED_ROUTES: frozenset[Route] = frozenset(
@@ -66,7 +67,9 @@ def _object_arguments(call: MockToolCall) -> dict[str, Any]:
         raise TypeError(
             f"{call.name} is a freeform call, which only the Responses protocol carries"
         )
-    return dict(call.arguments)
+    rendered = render_payload(call.arguments)
+    assert isinstance(rendered, dict)
+    return rendered
 
 
 def _anthropic_content(reply: MockReply) -> list[dict[str, Any]]:
@@ -267,7 +270,7 @@ def _responses_stream(reply: MockReply) -> tuple[str, str]:
             # A name offered as "<namespace>/<tool>" goes back as a namespaced function call.
             namespace, _, name = call.name.rpartition("/")
             item |= {"type": "function_call", "name": name}
-            item["arguments"] = json.dumps(dict(call.arguments))
+            item["arguments"] = json.dumps(_object_arguments(call))
             if namespace:
                 item["namespace"] = namespace
         tail.append({"type": "response.output_item.done", "item": item})

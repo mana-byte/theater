@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import AsyncIterator, Collection, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -49,6 +49,7 @@ async def expect_channel_facts(
     turn_started_at: float,
     evidence: Path,
     seconds: float = _OBSERVATION_SECONDS,
+    guard: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Require an exact event's admitted projection, or the channel's tool correlation."""
     assert page.stream_id is not None and page.cursor is not None
@@ -61,10 +62,11 @@ async def expect_channel_facts(
     deliveries: list[dict[str, object]] = []
     after_id = 0
     cursor = page.cursor
-    started = time.monotonic()
-    started_at = time.time()
+    started, started_at = time.monotonic(), time.time()
     try:
         while True:
+            if guard is not None:
+                await guard()
             tail = (
                 await client.diagnostics.bus_tail(
                     after_id=after_id, kinds=[BUS_KIND_AGENT_HARNESS_EVENT], wait_seconds=0
@@ -95,9 +97,7 @@ async def expect_channel_facts(
                 and (event is None or row["event"] == event)
             ]
             if event is not None:
-                projected = _event_projected(
-                    records.values(), accepted, participant, event, call_id
-                )
+                projected = _event_projected(records.values(), accepted, participant, event)
             else:
                 assert call_id is not None
                 projected = _correlated(records.values(), participant, call_id)
@@ -175,7 +175,6 @@ def _event_projected(
     accepted: Collection[Mapping[str, object]],
     participant: str,
     event: str,
-    call_id: str | None,
 ) -> bool:
     native_ids = {row["native_id"] for row in accepted if isinstance(row.get("native_id"), str)}
     primary_sources = {
@@ -183,8 +182,6 @@ def _event_projected(
         for record in records
         if record.kind in (TrajectoryKind.USER, TrajectoryKind.ASSISTANT, TrajectoryKind.TOOL_CALL)
     }
-    # Tool lifecycle revisions may coalesce; their exact tool id still proves the projection.
-    value = event if call_id is None else call_id
     return any(
         record.participant_id == participant
         and record.source not in primary_sources
@@ -192,14 +189,18 @@ def _event_projected(
             record.native_id == namespaced_native_id(native_id, record.source_epoch)
             for native_id in native_ids
         )
-        and _carries_value(record, value)
+        and _has_detail_value(record, event)
         for record in records
     )
 
 
 def _carries_value(record: TrajectoryRecord, value: str) -> bool:
     """Match complete values, never a plugin-specific detail name or an id substring."""
-    return value in (record.call_id, record.native_id) or any(
+    return value in (record.call_id, record.native_id) or _has_detail_value(record, value)
+
+
+def _has_detail_value(record: TrajectoryRecord, value: str) -> bool:
+    return any(
         detail.preview.text == value and not detail.preview.omitted_bytes
         for detail in record.details
     )
