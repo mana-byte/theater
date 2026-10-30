@@ -17,7 +17,7 @@ from theater.harness.contracts.runtime import (
     RuntimePlanningContext,
     RuntimeProbeContext,
 )
-from theater.harness.contracts.version_policy import VersionPolicy, version_key
+from theater.harness.contracts.version_policy import VersionPolicy
 
 from .constants import CODEX_BINARY
 
@@ -53,32 +53,6 @@ _CODEX_APPROVAL_OVERRIDES: dict[str, tuple[tuple[str, str], ...]] = {
 def qualified_versions_range_text() -> str:
     """Display the same inclusive policy used for admission."""
     return VERSION_POLICY.range_text
-
-
-def codex_version_refusal(version: str) -> str | None:
-    """Why this release is outside the qualified range, or None when it is admitted."""
-    try:
-        release = version_key(version)
-    except ValueError:
-        return f"codex-cli {version!r} is not a stable MAJOR.MINOR.PATCH release"
-    if VERSION_POLICY.admits(version):
-        return None
-    if version in VERSION_POLICY.excluded:
-        return f"codex-cli {version} is excluded by the compatibility policy"
-    if release < version_key(VERSION_POLICY.minimum):
-        return f"codex-cli {version} is older than the qualified floor"
-    return f"codex-cli {version} is newer than the newest proved release"
-
-
-def codex_refusal_message(version: str) -> str | None:
-    """The actionable refusal for an unqualified release."""
-    refusal = codex_version_refusal(version)
-    if refusal is None:
-        return None
-    return (
-        f"{refusal} (compatibility policy {CODEX_RUNTIME_COMPATIBILITY_POLICY}, qualified range "
-        f"{qualified_versions_range_text()}); install a qualified release or upgrade Theater"
-    )
 
 
 def codex_endpoint_url(endpoint: str) -> str:
@@ -125,7 +99,7 @@ def probe_codex_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibil
                 "refusing an unverified CLI release"
             ),
         )
-    refusal = codex_refusal_message(version)
+    refusal = VERSION_POLICY.refusal("codex-cli", version)
     if refusal is not None:
         return RuntimeCompatibility(
             supported=False,

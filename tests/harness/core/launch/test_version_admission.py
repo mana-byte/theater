@@ -34,7 +34,11 @@ def _refused_releases():
             pytest.param(
                 name,
                 version,
-                r"stable|usable" if label == "prerelease" else re.escape(policy.range_text),
+                (
+                    r"stable|usable"
+                    if label == "prerelease"
+                    else f"{re.escape(policy.range_text)}.*tell the user to"
+                ),
                 id=f"{name}-{label}",
             )
             for label, version in versions

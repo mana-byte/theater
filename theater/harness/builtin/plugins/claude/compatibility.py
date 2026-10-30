@@ -58,7 +58,7 @@ def _probe_claude(
         supported=supported,
         policy=policy,
         native_version=version,
-        reason=None if supported else f"Claude support requires {VERSION_POLICY.range_text}",
+        reason=VERSION_POLICY.refusal("Claude", version),
     )
 
 

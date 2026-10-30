@@ -73,7 +73,6 @@ def test_probe_range_gate_and_manifest_range(monkeypatch, version: str, supporte
         assert compatibility.reason is not None
         assert version in compatibility.reason
         assert f"qualified range {qualified_versions_range_text()}" in compatibility.reason
-        assert "install a qualified release" in compatibility.reason
     qualified_range = MANIFEST.native_compatibility.qualified_range
     assert qualified_range == qualified_versions_range_text()
     assert qualified_range == VERSION_POLICY.range_text

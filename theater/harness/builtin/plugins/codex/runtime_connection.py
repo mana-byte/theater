@@ -39,8 +39,8 @@ from .runtime_messages import (
 )
 from .runtime_plan import (
     CODEX_RUNTIME_COMPATIBILITY_POLICY,
+    VERSION_POLICY,
     codex_thread_config_overrides,
-    codex_version_refusal,
     plan_codex_frontend,
     qualified_versions_range_text,
 )
@@ -280,7 +280,7 @@ class CodexRuntimeConnection(CodexRuntimeHost):
         )
         # Recheck the qualified range at handshake; the binary may have changed since the
         # subprocess probe.
-        if native_version is None or codex_version_refusal(native_version) is not None:
+        if native_version is None or not VERSION_POLICY.admits(native_version):
             await self._abandon_connection(connection)
             raise RuntimeConnectionError(
                 "codex app-server handshake reported unverified native version "

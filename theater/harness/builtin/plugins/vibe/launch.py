@@ -47,11 +47,8 @@ def plan_launch(
             f"install a qualified release ({VERSION_POLICY.range_text})"
         )
     rendered = ".".join(str(part) for part in version)
-    if not VERSION_POLICY.admits(rendered):
-        raise BadRequest(
-            f"refusing to launch Vibe {rendered}: qualified releases are "
-            f"{VERSION_POLICY.range_text}; install a qualified release or upgrade Theater"
-        )
+    if refusal := VERSION_POLICY.refusal("Vibe", rendered):
+        raise BadRequest(f"refusing to launch Vibe: {refusal}")
     # No --experimental-harness: the observer reads both the classic session log
     # and the Unified Session Store that flag opts into, so neither is required.
     # Launch the binary the probe resolved: the pane's PATH may find another
