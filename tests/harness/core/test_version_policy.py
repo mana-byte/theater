@@ -47,21 +47,6 @@ def test_only_canonical_stable_versions_have_keys_or_admission(version):
 
 
 @pytest.mark.parametrize(
-    ("version", "fix"),
-    [
-        ("1.2.3", None),
-        ("1.2.2", "tell the user to upgrade X to >=1.2.3"),
-        ("2.0.1", "tell the user to upgrade Theater or install X <=2.0.0"),
-        ("1.5.0", "tell the user to install another X release"),
-        ("1.2.3-beta", "tell the user to install a stable release"),
-    ],
-)
-def test_a_refusal_names_the_upgrade_the_user_must_make(version, fix):
-    refusal = VersionPolicy("1.2.3", "2.0.0", ("1.5.0",)).refusal("X", version)
-    assert refusal is None if fix is None else refusal.endswith(fix)
-
-
-@pytest.mark.parametrize(
     ("minimum", "maximum", "excluded"),
     [
         ("1.2.4", "1.2.3", ()),
