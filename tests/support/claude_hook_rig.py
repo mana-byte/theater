@@ -13,8 +13,23 @@ _TOOL_INPUT = {"command": "printf hook-proof", "description": "Print the string 
 
 
 def captured_hooks() -> dict:
-    """Minimal payloads in the hook-input schema every supported release writes."""
+    """Synthetic payloads following the stock hook-input schemas."""
     return {
+        "user_prompt_submit": {
+            "session_id": _SESSION,
+            "transcript_path": _TRANSCRIPT,
+            "prompt_id": _PROMPT_ID,
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "A human or queued followup prompt",
+        },
+        "stop": {
+            "session_id": _SESSION,
+            "transcript_path": _TRANSCRIPT,
+            "prompt_id": _PROMPT_ID,
+            "hook_event_name": "Stop",
+            "stop_hook_active": False,
+            "last_assistant_message": "An answer that must remain transcript-owned",
+        },
         "pre_tool_use": {
             "session_id": _SESSION,
             "transcript_path": _TRANSCRIPT,

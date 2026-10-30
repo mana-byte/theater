@@ -205,6 +205,10 @@ the exact event projection; cleanup releases it on failure too, so start and ter
 cannot coalesce before the start is proved. Each binding gets an independent
 obligation alongside the channel's existing tool-correlation check. The event oracle joins its
 accepted bus delivery's native id to a new projected fact; another event cannot satisfy it.
+The first declared plain probe of an available channel also exercises a held original turn and
+FIFO strict/plain followups through the real provider, transcript and terminal awaits. Other
+plain probes use one ordinary turn. Independent missing-event canaries remove only added
+observation entries, preserving receipt/user hooks and all other event obligations.
 
 `CompatManifest.canaries` names extra generic mutations that this adapter's provisioning cannot
 mask. The mutation implementations and assertions stay in the shared suite. These tooling checks

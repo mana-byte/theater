@@ -106,7 +106,67 @@ def _remap_approval(requested: str, launched: str) -> str:
     )
 
 
+def _drop_hook(event: str) -> str:
+    """Remove only the selected event's added public-settings entries, retaining user hooks."""
+    return dedent(
+        """
+        def mutate(manifest):
+            import json
+            from theater.harness.contracts.manifest import HookChannelManifest
+
+            def wrap(channel):
+                if not isinstance(channel, HookChannelManifest) or channel.installer is None:
+                    return channel
+                inner = channel.installer
+
+                def installer(context):
+                    overlay = inner(context)
+                    replacements = dict(overlay.replacements)
+                    dropped = 0
+                    for path, text in overlay.replacements.items():
+                        original = json.loads(context.public_files[path])
+                        updated = json.loads(text)
+                        before = original.get("hooks", {}).get(EVENT, [])
+                        after = updated.get("hooks", {}).get(EVENT, [])
+                        if after[:len(before)] == before and len(after) > len(before):
+                            dropped += len(after) - len(before)
+                            updated["hooks"][EVENT] = before
+                            replacements[path] = json.dumps(updated) + "\\n"
+                    logging.getLogger("theater.canary").warning(
+                        "canary dropped %d %s", dropped, EVENT
+                    )
+                    return replace(overlay, replacements=replacements)
+
+                return replace(channel, installer=installer)
+
+            return replace(
+                manifest,
+                observation=replace(
+                    manifest.observation,
+                    enrichments=tuple(
+                        wrap(channel) for channel in manifest.observation.enrichments
+                    ),
+                ),
+            )
+        """
+    ).replace("EVENT", repr(event))
+
+
 MUTATIONS: tuple[Mutation, ...] = (
+    Mutation(
+        "prompt-submit-hook-dropped",
+        _drop_hook("UserPromptSubmit"),
+        {"channels:native-hooks/UserPromptSubmit": "fail"},
+        "channel",
+        DROPPED_EFFECT,
+    ),
+    Mutation(
+        "stop-hook-dropped",
+        _drop_hook("Stop"),
+        {"channels:native-hooks/Stop": "fail"},
+        "channel",
+        DROPPED_EFFECT,
+    ),
     Mutation(
         "manual-as-yolo",
         _contexts(_remap_approval("manual", "yolo")),

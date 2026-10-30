@@ -39,6 +39,7 @@ def claude_hook_context(payload, event):
             channel_id=channel.declaration.id,
             event=event,
             payload=payload,
+            delivery_id="fixture-invocation",
             expected_session_id=payload["session_id"],
             expected_transcript_location=payload["transcript_path"],
             expected_session_provenance="exact",
@@ -50,6 +51,7 @@ def claude_hook_context(payload, event):
         event=event,
         payload=payload,
         native_id=native_id,
+        delivery_id="fixture-invocation",
     )
 
 
@@ -119,6 +121,8 @@ def test_event_projection_matches_the_admitted_native_id_and_complete_value():
         ("pre_tool_use", "PreToolUse"),
         ("post_tool_use", "PostToolUse"),
         ("post_tool_use_failure", "PostToolUseFailure"),
+        ("user_prompt_submit", "UserPromptSubmit"),
+        ("stop", "Stop"),
     ],
 )
 @pytest.mark.parametrize("source_epoch", ["hook-epoch", "e" * 500])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -213,13 +214,14 @@ async def _claude_hook_event(
         id=participant_id,
         token=token,
         channel=NATIVE_HOOK_CHANNEL,
-        event="PreToolUse",
+        event=payload["hook_event_name"],
+        delivery_id=uuid.uuid4().hex,
         payload=payload,
     )
 
 
-def _pre_tool_payload(session_id: str, transcript_path: Path) -> dict[str, object]:
-    payload = captured_hooks()["pre_tool_use"]
+def _hook_payload(session_id: str, transcript_path: Path, *, fixture_key: str) -> dict[str, object]:
+    payload = captured_hooks()[fixture_key]
     assert isinstance(payload, dict)
     return dict(payload, session_id=session_id, transcript_path=str(transcript_path))
 
@@ -229,8 +231,9 @@ def _harness_event_count(daemon: Daemon) -> int:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fixture_key", ["pre_tool_use", "user_prompt_submit", "stop"])
 async def test_claude_hook_rpc_rejects_other_session_and_transcript_identity(
-    theater_home, tmp_path
+    theater_home, tmp_path, fixture_key
 ) -> None:
     daemon, participant, token = await _claude_hook_rig(tmp_path)
     client = DaemonClient(autostart=False)
@@ -250,7 +253,7 @@ async def test_claude_hook_rpc_rejects_other_session_and_transcript_identity(
                 client,
                 participant_id=participant.id,
                 token=token,
-                payload=_pre_tool_payload(other_session, other_transcript),
+                payload=_hook_payload(other_session, other_transcript, fixture_key=fixture_key),
             )
 
         # The filename/session join alone is insufficient: a same-session
@@ -260,7 +263,9 @@ async def test_claude_hook_rpc_rejects_other_session_and_transcript_identity(
                 client,
                 participant_id=participant.id,
                 token=token,
-                payload=_pre_tool_payload(session_id, tmp_path / "other" / transcript.name),
+                payload=_hook_payload(
+                    session_id, tmp_path / "other" / transcript.name, fixture_key=fixture_key
+                ),
             )
         assert _harness_event_count(daemon) == 0
         assert daemon.hook_runtime.health_snapshot(participant.id) == ()
@@ -270,8 +275,9 @@ async def test_claude_hook_rpc_rejects_other_session_and_transcript_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fixture_key", ["pre_tool_use", "user_prompt_submit", "stop"])
 async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noqa: PLR0915
-    theater_home, tmp_path, monkeypatch
+    theater_home, tmp_path, monkeypatch, fixture_key
 ) -> None:
     daemon, participant, token = await _claude_hook_rig(tmp_path)
     client = DaemonClient(autostart=False)
@@ -297,7 +303,7 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
             session_id=old_session,
             transcript_location=str(old_transcript),
         )
-        old_payload = _pre_tool_payload(old_session, old_transcript)
+        old_payload = _hook_payload(old_session, old_transcript, fixture_key=fixture_key)
         task = asyncio.create_task(
             _claude_hook_event(
                 client,
@@ -341,7 +347,7 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
             client,
             participant_id=participant.id,
             token=token,
-            payload=_pre_tool_payload(new_session, new_transcript),
+            payload=_hook_payload(new_session, new_transcript, fixture_key=fixture_key),
         )
         assert accepted == {"ok": True, "duplicate": False, "dropped": False}
         assert _harness_event_count(daemon) == 1
@@ -366,8 +372,9 @@ async def test_claude_hook_rpc_rechecks_identity_after_async_correlation(  # noq
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fixture_key", ["pre_tool_use", "user_prompt_submit", "stop"])
 async def test_claude_hook_queue_drops_admitted_delivery_after_identity_rotation(
-    theater_home, tmp_path
+    theater_home, tmp_path, fixture_key
 ) -> None:
     """An A delivery queued before rotation must never project in B's epoch."""
     daemon, participant, token = await _claude_hook_rig(tmp_path)
@@ -386,7 +393,7 @@ async def test_claude_hook_queue_drops_admitted_delivery_after_identity_rotation
             client,
             participant_id=participant.id,
             token=token,
-            payload=_pre_tool_payload(old_session, old_transcript),
+            payload=_hook_payload(old_session, old_transcript, fixture_key=fixture_key),
         ) == {"ok": True, "duplicate": False, "dropped": False}
 
         new_session = "22222222-2222-4222-8222-222222222222"
@@ -424,8 +431,9 @@ async def test_claude_hook_queue_drops_admitted_delivery_after_identity_rotation
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fixture_key", ["pre_tool_use", "user_prompt_submit", "stop"])
 async def test_claude_hook_queue_drops_when_identity_rotates_during_decode(
-    theater_home, tmp_path, monkeypatch
+    theater_home, tmp_path, monkeypatch, fixture_key
 ) -> None:
     """The source rechecks identity after its bounded off-loop decoder await."""
     daemon, participant, token = await _claude_hook_rig(tmp_path)
@@ -455,7 +463,7 @@ async def test_claude_hook_queue_drops_when_identity_rotates_during_decode(
             client,
             participant_id=participant.id,
             token=token,
-            payload=_pre_tool_payload(old_session, old_transcript),
+            payload=_hook_payload(old_session, old_transcript, fixture_key=fixture_key),
         ) == {"ok": True, "duplicate": False, "dropped": False}
         source = daemon.hook_runtime.open_source(
             participant_id=participant.id, channel=OBSERVATION.hook_channels[0]
