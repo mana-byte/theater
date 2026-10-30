@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from tests.support.claude_screens import CLAUDE_APPROVAL, CLAUDE_IDLE, CLAUDE_TRUST
+from tests.support.claude_screens import (
+    CLAUDE_APPROVAL,
+    CLAUDE_IDLE,
+    CLAUDE_IDLE_TASK_FOOTER,
+    CLAUDE_TRUST,
+)
 from tests.support.claude_seal import claude_marker, claude_record
 from tests.support.parse_rig import read_screen
 from tests.support.shipped import ClaudeCodeObserver
@@ -238,6 +243,9 @@ def test_claude_manual_mode_agents_footer_classifies_as_prompt():
         "⏵⏵ don't ask on (shift+tab to cycle)",
         "⏵⏵ auto mode on (shift+tab to cycle)",
         "⏵⏵ bypass permissions on",
+        CLAUDE_IDLE_TASK_FOOTER,
+        "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents"
+        "  new task? /clear to save 33k tokens",
     ],
 )
 def test_claude_mode_line_footer_family_classifies_as_prompt(footer):
@@ -245,6 +253,38 @@ def test_claude_mode_line_footer_family_classifies_as_prompt(footer):
     capture = "\n".join(["finished", "❯\u00a0", f"  {footer}"])
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
+@pytest.mark.parametrize(
+    "footer",
+    [
+        CLAUDE_IDLE_TASK_FOOTER.split("new task?")[0].rstrip(),
+        CLAUDE_IDLE_TASK_FOOTER.replace(" · ← 1 agent", ""),
+        CLAUDE_IDLE_TASK_FOOTER.replace("⏵⏵", "⏸"),
+        CLAUDE_IDLE_TASK_FOOTER.replace("bypass permissions", "accept edits"),
+        CLAUDE_IDLE_TASK_FOOTER.replace("122.3k tokens", "122 tokens"),
+        CLAUDE_IDLE_TASK_FOOTER.replace("shift+tab to cycle", "escape to stop"),
+        CLAUDE_IDLE_TASK_FOOTER + " trailing prose",
+        "Quoted: " + CLAUDE_IDLE_TASK_FOOTER,
+    ],
+)
+def test_claude_partial_or_unproved_task_footer_is_not_a_prompt(footer):
+    reading = ClaudeCodeObserver().screen_reading(f"finished\n❯\u00a0\n{footer}")
+    assert reading.kind is ScreenKind.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("marker", "kind"),
+    [
+        (CLAUDE_TRUST, ScreenKind.TRUST),
+        (CLAUDE_APPROVAL, ScreenKind.APPROVAL),
+        ("✻ Working… esc to interrupt", ScreenKind.WORKING),
+    ],
+)
+def test_claude_safety_markers_win_over_task_footer(marker, kind):
+    reading = ClaudeCodeObserver().screen_reading(f"{marker}\n{CLAUDE_IDLE_TASK_FOOTER}")
+    assert reading.kind is kind
     assert reading.confidence is ScreenConfidence.HIGH
 
 

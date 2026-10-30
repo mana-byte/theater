@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 from sqlalchemy import text
 
+from tests.support.claude_screens import CLAUDE_IDLE_TASK_FOOTER
 from tests.support.codex_screens import CODEX_APPROVAL, CODEX_IDLE
 from tests.support.control_harness import Harness, make_runtime, state_of
 from tests.support.waiting import wait_until
@@ -37,9 +38,9 @@ Press enter to confirm or esc to go back
 """
 
 
-def _spawn(daemon, terminal_provider, *, screen):
-    participant = daemon.registry.create_spawned(harness="codex", cwd="/repo")
-    terminal = terminal_provider.bind(daemon, participant.id, command="codex")
+def _spawn(daemon, terminal_provider, *, screen, harness="codex"):
+    participant = daemon.registry.create_spawned(harness=harness, cwd="/repo")
+    terminal = terminal_provider.bind(daemon, participant.id, command=harness)
     terminal_provider.presence[terminal] = "absent"
     if screen is not None:
         terminal_provider.screens[terminal] = screen
@@ -213,6 +214,41 @@ async def test_queued_followup_defers_then_recovers(daemon, terminal_provider, s
     assert terminal_provider.deliveries == [(terminal, "Then do this")]
     assert daemon.store.queued_control_operations(participant.id) == []
     assert daemon.store.get_job(job.handle).state == JobState.RUNNING
+
+
+async def test_claude_idle_task_footer_dispatches_queued_head(daemon, terminal_provider, client):
+    """An already-idle participant retries delivery when its ready footer appears."""
+    participant, terminal = _spawn(
+        daemon,
+        terminal_provider,
+        harness="claude",
+        screen=f"✻ Working… esc to interrupt\n{CLAUDE_IDLE_TASK_FOOTER}",
+    )
+    daemon.registry.set_status(participant.id, Status.WORKING)
+    first = await client.call(
+        "participant.queue_followup",
+        target=participant.id,
+        caller_id="cli",
+        prompt="Review the first task",
+        response_format={"$theater": "delegate"},
+    )
+    second = await client.call(
+        "participant.queue_followup",
+        target=participant.id,
+        caller_id="cli",
+        prompt="Review the second task",
+    )
+    daemon.registry.set_status(participant.id, Status.IDLE)
+    assert (await daemon.controls.dispatch_queue(participant.id)).deferred
+    assert terminal_provider.deliveries == []
+
+    terminal_provider.screens[terminal] = CLAUDE_IDLE_TASK_FOOTER
+    await wait_until(lambda: len(terminal_provider.deliveries) == 1, what="first Claude followup")
+    assert terminal_provider.deliveries == [(terminal, first["prompt"])]
+    assert [op.job_handle for op in daemon.store.queued_control_operations(participant.id)] == [
+        second["handle"]
+    ]
+    assert (await daemon.controls.dispatch_queue(participant.id)).deferred
 
 
 async def test_native_route_never_consults_the_provider_modal_gate(store):

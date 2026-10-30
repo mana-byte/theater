@@ -29,14 +29,16 @@ _MODE_LINE_PAIRS = (
 #: Composed at import: the footer is symbol + indicator + optional " on"
 #: + optional parenthesized hint, so the regex is built from the pairs.
 _MODE_LINE_RE = re.compile(
-    r"^(?:"
+    r"^(?:(?:"
     + "|".join(
         rf"{re.escape(symbol)} (?:"
         + "|".join(re.escape(indicator) for indicator in indicators)
         + r")"
         for symbol, indicators in _MODE_LINE_PAIRS
     )
-    + r")(?: on)?(?: \([^()]*\))?$"
+    + r")(?: on)?(?: \([^()]*\))?"
+    + r"|⏵⏵ bypass permissions on \(shift\+tab to cycle\) · ← \d+ agents?"
+    + r"[ \t]+new task\? /clear to save \d+(?:\.\d+)?k tokens)$"
 )
 
 
