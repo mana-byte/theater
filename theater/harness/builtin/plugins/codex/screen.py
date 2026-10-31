@@ -14,6 +14,8 @@ from .constants import (
     _SCREEN_TAIL_LINES,
     APPROVAL_MARKER,
     PROMPT,
+    STATUS_DETAILS_PREFIX,
+    STATUS_ROW_BULLETS,
     TRUST_MARKERS,
     WORKING_MARKER,
 )
@@ -64,9 +66,26 @@ def _live_modal(capture: str) -> ScreenKind | None:
     return None
 
 
+def _has_status_row(capture: str) -> bool:
+    """A live status row is the first non-details line above the composer; a finished turn ends
+    in its `Worked for` separator instead."""
+    lines = [line.strip() for line in screen_tail(capture, _MODAL_TAIL_LINES)]
+    composer = _lowest(lines, _is_composer)
+    if composer is None:
+        return False
+    for line in reversed(lines[:composer]):
+        if not line.startswith(STATUS_DETAILS_PREFIX):
+            return line.startswith(STATUS_ROW_BULLETS)
+    return False
+
+
 class CodexScreenMixin:
     def is_idle_screen(self, capture: str) -> bool:
-        if WORKING_MARKER in capture or _live_modal(capture) is not None:
+        if (
+            WORKING_MARKER in capture
+            or _live_modal(capture) is not None
+            or _has_status_row(capture)
+        ):
             return False
         lines = [line.strip() for line in screen_tail(capture, _SCREEN_TAIL_LINES)]
         composer = _lowest(lines, _is_composer)
@@ -80,6 +99,8 @@ class CodexScreenMixin:
             return ScreenReading(kind=modal, confidence=ScreenConfidence.HIGH)
         if WORKING_MARKER in capture:
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
+        if _has_status_row(capture):
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.LOW)
         if self.is_idle_screen(capture):
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         return ScreenReading(kind=ScreenKind.UNKNOWN, confidence=ScreenConfidence.LOW)

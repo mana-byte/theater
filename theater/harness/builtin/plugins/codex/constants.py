@@ -32,6 +32,10 @@ CODEX_RAW_TOOL_RESULT_TYPES = frozenset(
 
 PROMPT = "\u203a"
 WORKING_MARKER = "esc to interrupt"
+#: The status row now shows the streamed reasoning sentence, so a long one truncates away its
+#: `(Ns • esc to interrupt)` suffix; the row is then found by its blinking bullet and `└` details.
+STATUS_ROW_BULLETS = ("\u2022", "\u25e6")
+STATUS_DETAILS_PREFIX = "\u2514"
 APPROVAL_MARKER = "to cancel"
 #: Confirmed trust-dialog headers, matched only inside the bounded modal
 #: tail and only alongside dialog chrome — never as bare prose. Unconfirmed
