@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 
-from tests.support.observation import apply_batch
-from tests.support.observer_rigs import WaitingHarness, screen_checked
+from tests.support.observation import LIVE_CHANNEL, apply_batch
+from tests.support.observer_rigs import WaitingHarness, WaitingSource, screen_checked
 from tests.support.shipped import VibeHarness
 from tests.support.waiting import until
 from theater.constants.observation import (
@@ -22,6 +22,7 @@ from theater.constants.observation import (
     SCREEN_CHECK_BACKOFF_CAP_SECONDS,
     WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
+from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
     Observer,
@@ -30,6 +31,7 @@ from theater.daemon.observer import (
 )
 from theater.daemon.schema import participants as participants_table
 from theater.harness.base import Event, EventKind
+from theater.harness.contracts.runtime import LiveChannelDeclaration
 from theater.harness.observation import (
     ScreenConfidence,
     ScreenKind,
@@ -112,6 +114,31 @@ async def test_an_unknown_screen_reading_leaves_the_status_untouched(registry):
     )
     await observer2._check_idle_screen(p2.id, screen2)
     assert registry.get(p2.id).status is Status.IDLE
+
+
+@pytest.mark.asyncio
+async def test_a_native_participant_is_never_demoted_by_its_prompt_screen(registry):
+    """A pane can show an idle composer mid-turn; the live channel owns status, not the screen."""
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH),
+        status=Status.WORKING,
+        awaiting=0.0,
+    )
+    observer.live.register(
+        LiveRegistration(
+            participant_id=p.id,
+            live_source=WaitingSource(),
+            channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+            backend_generation=1,
+        )
+    )
+    await observer._screen_status_due(p.id, screen, QuietClock(screen_quiet_since=-1.0))
+    assert registry.get(p.id).status is Status.WORKING
+
+    observer.live.unregister(p.id)
+    await observer._screen_status_due(p.id, screen, QuietClock(screen_quiet_since=-1.0))
+    assert registry.get(p.id).status is Status.IDLE
 
 
 @pytest.mark.asyncio

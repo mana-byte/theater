@@ -219,6 +219,7 @@ class Observer(
             monotonic_fn=self._monotonic,
             config_fn=lambda: self,
             jobs_fn=lambda: self.jobs,
+            live_fn=lambda pid: self.live.registration_for(pid) is not None,
             telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 

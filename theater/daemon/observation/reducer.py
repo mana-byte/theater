@@ -145,6 +145,7 @@ class Reducer:
         monotonic_fn,
         config_fn,
         jobs_fn,
+        live_fn,
         telemetry_fn=None,
     ):
         self.store = store
@@ -154,6 +155,7 @@ class Reducer:
         self._monotonic_fn = monotonic_fn
         self._config_fn = config_fn
         self._jobs_fn = jobs_fn
+        self._live_fn = live_fn
         self._telemetry_fn = telemetry_fn
 
     @property
@@ -579,6 +581,9 @@ class Reducer:
         source_status: Status | None = None,
     ) -> None:
         """Run the independently throttled status-only screen arm when due."""
+        if self._live_fn(pid):
+            # A native channel owns status: a pane can read idle mid-turn, so it never overrides it.
+            return
         now = self._monotonic_fn()
         if clock.screen_quiet_since is None:
             clock.screen_quiet_since = now
