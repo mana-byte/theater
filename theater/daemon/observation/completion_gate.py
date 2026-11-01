@@ -14,7 +14,9 @@ from theater.daemon.observation.completion import CompletionTracker
 from theater.daemon.observation.live import LiveObservationHub, LiveRegistration
 from theater.daemon.observation.reducer import QuietClock
 from theater.daemon.observation.turns import TurnAccumulator
+from theater.daemon.runtime.launch_policy import decode_launch_policy
 from theater.harness import HarnessObserver, TurnTerminal
+from theater.harness.contracts.runtime import RuntimeWiring
 from theater.harness.contracts.source import NativeTurnState
 from theater.models import JobState
 
@@ -162,7 +164,16 @@ class CompletionGate:
         self, participant_id: str, registration: LiveRegistration | None = None
     ) -> bool:
         current = registration or self.live.registration_for(participant_id)
-        return current is not None and current.channel.drives_job_completion
+        if current is not None and current.channel.drives_job_completion:
+            return True
+        # A daemon restart must not restore heuristics while the native bridge reconnects.
+        binding = self.store.get_runtime_binding(participant_id)
+        return (
+            binding is not None
+            and binding.wiring is RuntimeWiring.NATIVE
+            and decode_launch_policy(binding.launch_policy).fields.get("drives_job_completion")
+            is True
+        )
 
 
 @dataclass(frozen=True, slots=True)

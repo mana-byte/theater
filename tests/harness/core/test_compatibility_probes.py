@@ -82,7 +82,8 @@ def test_an_uninstalled_harness_reports_no_wiring_or_routes():
     assert record["routes"] is None
 
 
-def test_a_runtimeless_harness_keeps_its_declared_range():
+def test_a_runtimeless_harness_keeps_its_declared_range(monkeypatch):
+    monkeypatch.setattr(harness_registry.HARNESSES["claude"], "runtime", None)
     record = harness_registry.native_compatibility_record(
         harness_registry.HARNESSES["claude"], installed=True, result=_SUPPORTED
     )

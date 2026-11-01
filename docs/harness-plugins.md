@@ -1215,6 +1215,21 @@ file path plus a participant Unix endpoint to the extension. It authenticates
 the connection before activating the runtime and keeps connection handlers
 bounded during replacement and shutdown.
 
+Claude also uses `RuntimeHost.FRONTEND`, with `drives_job_completion=True`.
+Its installer adds launch-local `args` as well as files and environment; it never rewrites
+user settings. The UI starts promptless, and an authenticated native handshake precedes
+initial dispatch through the existing spawn job. Its function-hook plugin exchanges bounded
+HTTP messages over the private Unix socket; the newline-JSON frontend protocol remains valid.
+Send and exact-turn interrupt are native; steer and settings updates are unavailable.
+
+Completion-owning frontends must register the control service's evidence sink on initial
+connection and daemon recovery. The launch policy pins `drives_job_completion` so ownership
+also survives the interval before a restarted daemon reconnects. Preserve the registration
+during disconnection. A live source
+may retain outcomes until `terminal_evidence_delivered()`; wrappers must forward the callback
+only after durable routing. Claude uses it to prune its bounded native journal. Startup may
+fall back before native activation, never after a possibly accepted submission.
+
 OpenCode uses `RuntimeHost.DETACHED_BACKEND`: Theater starts authenticated
 `opencode serve` on a discovered loopback endpoint, creates the exact session, and
 launches the stock UI with `opencode --server <url> -s <id>`. The backend and its safe ordinary fallback
