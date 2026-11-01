@@ -216,13 +216,18 @@ async def test_queued_followup_defers_then_recovers(daemon, terminal_provider, s
     assert daemon.store.get_job(job.handle).state == JobState.RUNNING
 
 
-async def test_claude_idle_task_footer_dispatches_queued_head(daemon, terminal_provider, client):
+@pytest.mark.parametrize(
+    "footer", [CLAUDE_IDLE_TASK_FOOTER, CLAUDE_IDLE_TASK_FOOTER.split("new task?")[0].rstrip()]
+)
+async def test_claude_idle_task_footer_dispatches_queued_head(
+    daemon, terminal_provider, client, footer
+):
     """An already-idle participant retries delivery when its ready footer appears."""
     participant, terminal = _spawn(
         daemon,
         terminal_provider,
         harness="claude",
-        screen=f"✻ Working… esc to interrupt\n{CLAUDE_IDLE_TASK_FOOTER}",
+        screen=f"✻ Working… esc to interrupt\n{footer}",
     )
     daemon.registry.set_status(participant.id, Status.WORKING)
     first = await client.call(
@@ -242,7 +247,7 @@ async def test_claude_idle_task_footer_dispatches_queued_head(daemon, terminal_p
     assert (await daemon.controls.dispatch_queue(participant.id)).deferred
     assert terminal_provider.deliveries == []
 
-    terminal_provider.screens[terminal] = CLAUDE_IDLE_TASK_FOOTER
+    terminal_provider.screens[terminal] = footer
     await wait_until(lambda: len(terminal_provider.deliveries) == 1, what="first Claude followup")
     assert terminal_provider.deliveries == [(terminal, first["prompt"])]
     assert [op.job_handle for op in daemon.store.queued_control_operations(participant.id)] == [

@@ -38,7 +38,7 @@ _MODE_LINE_RE = re.compile(
     )
     + r")(?: on)?(?: \([^()]*\))?"
     + r"|⏵⏵ bypass permissions on \(shift\+tab to cycle\) · ← \d+ agents?"
-    + r"[ \t]+new task\? /clear to save \d+(?:\.\d+)?k tokens)$"
+    + r"(?:[ \t]+new task\? /clear to save \d+(?:\.\d+)?k tokens)?)$"
 )
 
 
