@@ -400,6 +400,7 @@ def install_frontend_plan(
     )
     return replace(
         plan,
+        argv=[*plan.argv, *overlay.args],
         env=env,
         files=files,
         channel_credentials=(*plan.channel_credentials, credential),

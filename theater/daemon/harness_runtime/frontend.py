@@ -18,6 +18,7 @@ from theater.daemon.harness_runtime.constants import FRONTEND_LINE_MAX_BYTES, FR
 from theater.daemon.harness_runtime.frontend_requests import FrontendRequests
 from theater.harness.contracts.runtime import (
     RuntimeConnectionClosed,
+    RuntimeConnectionError,
     RuntimeFrontendConnection,
     RuntimeNotification,
 )
@@ -33,11 +34,13 @@ class FrontendProtocolError(ValueError):
 
 
 class UnixFrontendConnection(RuntimeFrontendConnection):
-    def __init__(self, writer: asyncio.StreamWriter) -> None:
+    def __init__(
+        self, writer: asyncio.StreamWriter | None, *, include_deadline: bool = False
+    ) -> None:
         self._writer = writer
         self._queue: asyncio.Queue[RuntimeNotification | None] = asyncio.Queue(FRONTEND_QUEUE_MAX)
         self._closed = False
-        self._requests = FrontendRequests(self._send_frame)
+        self._requests = FrontendRequests(self._send_frame, include_deadline=include_deadline)
 
     @property
     def closed(self) -> bool:
@@ -61,6 +64,8 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
     async def _send_frame(self, payload: bytes) -> None:
         if self._closed:
             raise RuntimeConnectionClosed("frontend connection is closed")
+        if self._writer is None:
+            raise RuntimeConnectionClosed("frontend connection has no writer")
         try:
             self._writer.write(payload)
             await self._writer.drain()
@@ -83,7 +88,8 @@ class UnixFrontendConnection(RuntimeFrontendConnection):
         self._requests.close()
         with contextlib.suppress(asyncio.QueueFull):
             self._queue.put_nowait(None)
-        await _close_writer(self._writer)
+        if self._writer is not None:
+            await _close_writer(self._writer)
 
 
 @dataclass(slots=True)
@@ -99,6 +105,8 @@ class _Listener:
     connection_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     handlers: set[asyncio.Task] = field(default_factory=set)
     closed: bool = False
+    http_generation: int = 0
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class FrontendRuntimeHost:
@@ -150,6 +158,15 @@ class FrontendRuntimeHost:
             )
             self._listeners[participant_id] = listener
 
+    async def wait_ready(self, participant_id: str, *, timeout: float) -> None:
+        listener = self._listeners.get(participant_id)
+        if listener is None:
+            raise FrontendProtocolError("frontend listener was not started")
+        async with asyncio.timeout(timeout):
+            await listener.ready.wait()
+        if listener.closed or listener.active is None or listener.active.closed:
+            raise FrontendProtocolError("frontend connection closed before readiness")
+
     async def close(self, participant_id: str) -> None:
         async with self._lock:
             listener = self._listeners.pop(participant_id, None)
@@ -165,6 +182,7 @@ class FrontendRuntimeHost:
 
     async def _close_listener(self, listener: _Listener) -> None:
         listener.closed = True
+        listener.ready.set()
         listener.server.close()
         handlers = tuple(listener.handlers)
         for task in handlers:
@@ -184,6 +202,83 @@ class FrontendRuntimeHost:
                         await listener.on_disconnect(active)
         _remove_stale_socket(listener.path)
 
+    async def _handle_http(self, listener, reader, writer, first: bytes) -> None:
+        from theater.daemon.harness_runtime.frontend_http import (
+            HttpFrontendConnection,
+            read_exchange,
+            reply,
+        )
+
+        peer = None
+        try:
+            async with asyncio.timeout(5.0):
+                packet = await read_exchange(reader, first)
+            _validate_hello(packet, listener.token)
+            generation = packet["generation"]
+            messages = packet.get("messages", [])
+            assert isinstance(generation, int) and isinstance(messages, list)
+            async with listener.connection_lock:
+                if listener.closed or generation < listener.http_generation:
+                    raise FrontendProtocolError("stale frontend generation")
+                peer = listener.active
+                if not (
+                    isinstance(peer, HttpFrontendConnection)
+                    and not peer.closed
+                    and peer.generation == generation
+                ):
+                    if peer is not None:
+                        await peer.aclose()
+                        await listener.on_disconnect(peer)
+                    peer = HttpFrontendConnection(generation)
+                    listener.active = peer
+                    listener.ready.clear()
+                    listener.http_generation = generation
+                    task = asyncio.create_task(self._serve_http_peer(listener, peer))
+                    listener.handlers.add(task)
+                    task.add_done_callback(listener.handlers.discard)
+            peer.touch()
+            received = []
+            for message in messages:
+                _receive_frame(peer, message)
+                if message.get("type") == "response":
+                    received.append(message["id"])
+            request = None
+            with contextlib.suppress(TimeoutError):
+                request = await peer.next_request()
+            if peer is not listener.active or peer.closed:
+                raise FrontendProtocolError("frontend connection was replaced")
+            await reply(writer, 200, {"request": request, "received": received})
+        except (
+            ValueError,
+            TypeError,
+            TimeoutError,
+            RuntimeConnectionError,
+            asyncio.IncompleteReadError,
+        ):
+            if peer is not None:
+                await peer.aclose()
+            await reply(writer, 409, {"error": "frontend exchange refused"})
+
+    async def _serve_http_peer(self, listener, peer) -> None:
+        try:
+            async with asyncio.timeout(10.0):
+                await listener.on_connect(peer)
+            if listener.active is not peer or peer.closed:
+                return
+            listener.ready.set()
+            await peer.wait_for_disconnect()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("HTTP frontend activation failed for %s", listener.participant_id)
+        finally:
+            await peer.aclose()
+            async with listener.connection_lock:
+                if listener.active is peer:
+                    listener.active = None
+                    listener.ready.clear()
+                    await listener.on_disconnect(peer)
+
     async def _handle(
         self,
         listener: _Listener,
@@ -199,7 +294,11 @@ class FrontendRuntimeHost:
         try:
             if listener.closed:
                 return
-            hello = await asyncio.wait_for(_read_message(reader), timeout=5.0)
+            first = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            if first.startswith(b"POST "):
+                await self._handle_http(listener, reader, writer, first)
+                return
+            hello = _decode_message(first)
             _validate_hello(hello, listener.token)
             connection = UnixFrontendConnection(writer)
             # Initial attachment can request a snapshot. The response reader
@@ -224,6 +323,7 @@ class FrontendRuntimeHost:
                 async with listener.connection_lock:
                     if listener.active is connection:
                         listener.active = None
+                        listener.ready.clear()
                         if connected:
                             with contextlib.suppress(Exception):
                                 async with asyncio.timeout(5.0):
@@ -251,6 +351,7 @@ async def _activate(listener: _Listener, connection: UnixFrontendConnection) -> 
             return False
         previous = listener.active
         listener.active = connection
+        listener.ready.clear()
         if previous is not None:
             await previous.aclose()
             with contextlib.suppress(Exception):
@@ -263,6 +364,7 @@ async def _activate(listener: _Listener, connection: UnixFrontendConnection) -> 
             if listener.active is connection:
                 listener.active = None
             raise
+        listener.ready.set()
         return True
 
 
@@ -270,13 +372,17 @@ async def _read_frames(reader: asyncio.StreamReader, connection: UnixFrontendCon
     try:
         while True:
             message = await _read_message(reader)
-            if message.get("type") == "response":
-                connection.receive_response(message)
-            else:
-                message_type = message.pop("type", None)
-                connection.publish(_notification_for(message_type, message))
+            _receive_frame(connection, message)
     finally:
         await connection.aclose()
+
+
+def _receive_frame(connection: UnixFrontendConnection, message: dict[str, object]) -> None:
+    if message.get("type") == "response":
+        connection.receive_response(message)
+    else:
+        message_type = message.pop("type", None)
+        connection.publish(_notification_for(message_type, message))
 
 
 async def _read_message(reader: asyncio.StreamReader) -> dict[str, object]:
@@ -286,6 +392,12 @@ async def _read_message(reader: asyncio.StreamReader) -> dict[str, object]:
         raise FrontendProtocolError("frontend frame exceeds the line limit") from exc
     if not line:
         raise asyncio.IncompleteReadError(line, None)
+    if len(line) > FRONTEND_LINE_MAX_BYTES or not line.endswith(b"\n"):
+        raise FrontendProtocolError("frontend frame exceeds the line limit")
+    return _decode_message(line)
+
+
+def _decode_message(line: bytes) -> dict[str, object]:
     if len(line) > FRONTEND_LINE_MAX_BYTES or not line.endswith(b"\n"):
         raise FrontendProtocolError("frontend frame exceeds the line limit")
     try:

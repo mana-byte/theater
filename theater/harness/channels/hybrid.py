@@ -539,9 +539,7 @@ class HybridSource(Source):
 
     def acknowledge_source_checkpoint(self) -> None:
         """Both halves advance once the batch — evidence included — is durable."""
-        self._remember_delivered_evidence()
-        self._held_evidence = ()
-        self._last_read_event_ids = ()
+        self.terminal_evidence_delivered()
         self._durable.acknowledge_source_checkpoint()
         with contextlib.suppress(Exception):
             self._live.acknowledge_source_checkpoint()
@@ -552,6 +550,7 @@ class HybridSource(Source):
         Independent of the durable cursor, which may not advance (rejected attachment, failed
         apply).
         """
+        self._live.terminal_evidence_delivered()
         self._remember_delivered_evidence()
         self._held_evidence = ()
         self._last_read_event_ids = ()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 
@@ -36,7 +37,10 @@ class FrontendRequests:
     Sent once; a possibly applied mutation is never replayed or moved to another peer.
     """
 
-    def __init__(self, send_frame: Callable[[bytes], Awaitable[None]]) -> None:
+    def __init__(
+        self, send_frame: Callable[[bytes], Awaitable[None]], *, include_deadline: bool = False
+    ) -> None:
+        self._include_deadline = include_deadline
         self._send_frame = send_frame
         self._pending: dict[str, asyncio.Future[Mapping[str, object]]] = {}
         self._closed = False
@@ -55,9 +59,17 @@ class FrontendRequests:
         if len(self._pending) >= FRONTEND_REQUEST_MAX_PENDING:
             raise RuntimeConnectionSaturated("frontend pending request limit reached")
         request_id = uuid.uuid4().hex
+        frame: dict[str, object] = {
+            "type": "request",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        if self._include_deadline:
+            frame["deadline_ms"] = int((time.time() + timeout) * 1000)
         payload = (
             json.dumps(
-                {"type": "request", "id": request_id, "method": method, "params": params},
+                frame,
                 separators=(",", ":"),
                 ensure_ascii=False,
                 allow_nan=False,
@@ -86,6 +98,11 @@ class FrontendRequests:
                 # awaiting backpressure. Consume that exception on timeout or
                 # cancellation too, so it cannot become an unhandled future.
                 future.exception()
+
+    def pending(self, request_id: str) -> bool:
+        """An expired queued transport frame must never be delivered later."""
+        future = self._pending.get(request_id)
+        return future is not None and not future.done()
 
     def receive(self, frame: Mapping[str, object]) -> bool:
         """Accept a matching response, or ignore an expired/duplicate id."""
