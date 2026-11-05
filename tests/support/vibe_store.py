@@ -116,6 +116,7 @@ class Store:
         runtime_catalog: Any = None,
         runtime_actions: list[dict[str, Any]] | None = None,
         session_metadata: dict[str, Any] | None = None,
+        projection_extra: dict[str, Any] | None = None,
     ) -> None:
         first_sequence = snapshot_sequence + 1
         checkpoint = {"checkpoint_version": 1, "context": {"messages": state["history"]["entries"]}}
@@ -137,6 +138,7 @@ class Store:
             "snapshot_sequence": snapshot_sequence,
             "watermark": watermark,
             "snapshot": state,
+            **(projection_extra or {}),
         }
         checkpoint_chunks = self._pool(checkpoint, ("context", "messages")) if pooled else None
         projection_chunks = (
