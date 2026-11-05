@@ -394,6 +394,42 @@ def test_command_execution_and_reasoning_items_stay_silent():
     assert len(result_events) == 1
 
 
+def test_reasoning_and_reply_take_their_span_from_the_item():
+    """Raw records carry the words, the item twin the span; encrypted reasoning keeps its span."""
+    observer = CodexObserver()
+    thought = {"type": "Reasoning", "id": "rs_1", "summary_text": ["plan"], "raw_content": []}
+    hidden = {"type": "Reasoning", "id": "rs_2", "summary_text": [], "raw_content": []}
+    reply = {"type": "AgentMessage", "id": "msg_1", "content": [{"type": "Text", "text": "done"}]}
+    parsed = parse_rollout(
+        observer,
+        [
+            item_completed("turn-a", thought, started_ms=1789040000000, completed_ms=1789040002000),
+            rollout_record(
+                "response_item",
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "plan"}],
+                },
+            ),
+            item_completed("turn-a", hidden, started_ms=1789040002000, completed_ms=1789040005000),
+            item_completed("turn-a", reply, started_ms=1789040005000, completed_ms=1789040009000),
+            _raw_message("turn-a", "assistant", "msg_1", "done", "output_text"),
+        ],
+    )
+
+    spans = {
+        fact.summary: fact.timing.duration_ms
+        for fact in rollout_facts(parsed)
+        if fact.kind in (TrajectoryKind.REASONING, TrajectoryKind.ASSISTANT)
+    }
+    assert spans == {
+        "plan": pytest.approx(2000),
+        "reasoning": pytest.approx(3000),
+        "done": pytest.approx(4000),
+    }
+
+
 def test_mcp_tool_call_item_produces_paired_events_and_facts():
     """MCP calls exist only as items in paginated history — report both sides."""
     observer = CodexObserver()

@@ -187,6 +187,8 @@ def _codex_item_timing(
     if completed is not None:
         shadow["completed_at"] = completed
     duration = _codex_duration(item.get("duration"))
+    if duration is None and started is not None and completed is not None:
+        duration = (completed - started) * 1_000
     if duration is not None:
         shadow["duration_ms"] = duration
     return _codex_timing(record, shadow, timestamp)
