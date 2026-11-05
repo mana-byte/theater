@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from theater.constants.trajectory import TRAJECTORY_MCP_CALL_CONTEXT_LIMIT
 from theater.harness.base import NativeChild
 from theater.harness.contracts.trajectory import TrajectoryFact
 from theater.harness.normalization.facts import FactAdder, fact_builder, path_details, tool_failure
@@ -62,6 +63,9 @@ from .values import (
 
 _codex_build = fact_builder(source="codex", identifier=_trajectory_id)
 
+# Items whose raw ``response_item`` twin has the words but not the span.
+_SPAN_ITEM_TYPES = frozenset({"Reasoning", "AgentMessage", "WebSearch"})
+
 
 class CodexTrajectoryMixin:
     if TYPE_CHECKING:
@@ -70,6 +74,7 @@ class CodexTrajectoryMixin:
         _last_model: str | None
         _last_provider: str | None
         _mcp_calls: dict[str, tuple[str, str]]
+        _item_spans: dict[str, Timing]
         _tool_correlation: ToolCorrelation
         _usage_responses: dict[str, tuple[str, str | None, str | None]]
 
@@ -328,6 +333,21 @@ class CodexTrajectoryMixin:
                     else ()
                 ),
             )
+        elif item_type == "Reasoning" and not (item.get("summary_text") or item.get("raw_content")):
+            # The raw twin of an encrypted-only reasoning item emits nothing; keep its span.
+            add(
+                TrajectoryKind.REASONING,
+                TrajectoryLane.MODEL,
+                "reasoning",
+                native_id=item_id,
+                status=TrajectoryStatus.COMPLETED,
+                turn=item_turn,
+                fact_timing=item_timing,
+            )
+        elif item_type in _SPAN_ITEM_TYPES and item_id is not None and item_timing is not None:
+            self._item_spans[item_id] = item_timing
+            while len(self._item_spans) > TRAJECTORY_MCP_CALL_CONTEXT_LIMIT:
+                self._item_spans.pop(next(iter(self._item_spans)))
         elif item_type == "ContextCompaction":
             add(
                 TrajectoryKind.CONTEXT,
@@ -641,7 +661,8 @@ class CodexTrajectoryMixin:
         if not isinstance(payload, dict):
             return []
         timestamp = _epoch(record.get("timestamp"))
-        timing = _codex_timing(record, payload, timestamp)
+        span = self._item_spans.pop(_trajectory_id(payload.get("id")) or "", None)
+        timing = span or _codex_timing(record, payload, timestamp)
         record_id = _trajectory_id(record.get("id") or record.get("uuid"))
         turn_id = _codex_trajectory_turn_id(payload) or self._active_turn_id
         step_id = _trajectory_id(payload.get("step_id") or payload.get("stepId"))

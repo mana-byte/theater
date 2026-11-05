@@ -10,6 +10,7 @@ from theater.harness.contracts.source import Source
 from theater.harness.observation import TranscriptObserver
 from theater.provenance import TranscriptProvenance, normalize_provenance
 from theater.trajectory.capabilities import TrajectoryCapabilities, TrajectoryFeature
+from theater.trajectory.records import Timing
 
 from .correlation import ToolCorrelation
 from .homes import sessions_root
@@ -64,6 +65,7 @@ class CodexObserver(
         self._active_turn_id: str | None = None
         self._mcp_calls: dict[str, tuple[str, str]] = {}
         self._tool_correlation = ToolCorrelation()
+        self._item_spans: dict[str, Timing] = {}
         # token_count snapshots do not carry response or model identity. Newer
         # rollouts persist a token_usage_record immediately before them; retain
         # that exact identity and its contemporaneous attribution for repeats.
