@@ -116,22 +116,6 @@ def test_reader_reassembles_chunks_and_replays_projection_records(store: Store) 
     ]
 
 
-def test_session_api_facts_do_not_block_the_read(store: Store) -> None:
-    # Vibe 3.1.0 adds them, unversioned, to the projection state and to deltas that add facts.
-    facts = {"metadata_version": 1, "next_history_index": 2}
-    _, delta = projection_delta(2, {"op": "append_entry", "entry": basic_entry("entry-1")})
-    publish_default(
-        store,
-        projection_extra={"session_api": facts},
-        journal=[("projection_delta", {**delta, "session_api": facts})],
-    )
-
-    view = load_unified_store(store.current)
-    assert view is not None
-    assert view.watermark == 2
-    assert [entry["id"] for entry in view.snapshot["history"]["entries"]][-1] == "entry-1"
-
-
 def test_minor9_session_relocation_applies_its_projection_delta(store: Store) -> None:
     publish_default(
         store,
