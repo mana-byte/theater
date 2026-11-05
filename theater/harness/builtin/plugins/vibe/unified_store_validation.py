@@ -68,7 +68,8 @@ def _validate_journal_record(value: Any, expected_sequence: int) -> _JournalReco
         keys = {"watermark", "delta"}
         if record_type == "session_relocated":
             keys |= {"metadata", "plugin_lock"}
-        _require_strict_object(payload, keys, f"{record_type} payload")
+        optional = {"session_api"} if record_type == "projection_delta" else set()
+        _require_strict_object(payload, keys | optional, f"{record_type} payload", required=keys)
         for opaque in keys - {"watermark", "delta"}:
             if not isinstance(payload[opaque], dict):
                 raise UnifiedStoreError(f"{record_type} {opaque} must be an object")
@@ -353,11 +354,15 @@ def _validate_manifest(value: Any) -> _Manifest:
 
 def _validate_projection_document(value: Any) -> _ProjectionDocument:
     """Validate a projection-state document and return its validated facts."""
-    _require_strict_object(
-        value,
-        {"projection_state_version", "session_id", "snapshot_sequence", "watermark", "snapshot"},
-        "projection state",
-    )
+    required = {
+        "projection_state_version",
+        "session_id",
+        "snapshot_sequence",
+        "watermark",
+        "snapshot",
+    }
+    # Vibe 3.1.0 adds ``session_api`` without a minor bump; the reader has no use for it.
+    _require_strict_object(value, required | {"session_api"}, "projection state", required=required)
     assert isinstance(value, dict)
     _literal_integer(value["projection_state_version"], 1, "projection state version")
     session_id = value["session_id"]
