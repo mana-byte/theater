@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from theater.harness.contracts import version_probe
@@ -28,6 +29,28 @@ def probe_claude_hooks(context: RuntimeProbeContext) -> RuntimeCompatibility:
 def probe_claude_native_compatibility(context: RuntimeProbeContext) -> RuntimeCompatibility:
     """Check the plugin's qualified CLI range."""
     return _probe_claude(context, policy=_MESSAGING_POLICY)
+
+
+def probe_claude_frontend(context: RuntimeProbeContext) -> RuntimeCompatibility:
+    """Version admission plus the CLI's function-hook command surface; the handshake proves load."""
+    result = _probe_claude(context, policy=f"claude-frontend-{VERSION_POLICY.minimum}")
+    if not result.supported:
+        return result
+    try:
+        help_result = subprocess.run(
+            [context.binary or "claude", "plugin", "test", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return replace(result, supported=False, reason="Claude function-hook probe failed")
+    if help_result.returncode != 0 or "plugin test" not in help_result.stdout:
+        return replace(
+            result, supported=False, reason="Claude function-hook commands are unavailable"
+        )
+    return result
 
 
 def _probe_claude(
@@ -62,4 +85,4 @@ def _probe_claude(
     )
 
 
-__all__ = ["probe_claude_hooks", "probe_claude_native_compatibility"]
+__all__ = ["probe_claude_frontend", "probe_claude_hooks", "probe_claude_native_compatibility"]
