@@ -46,7 +46,12 @@ from theater.daemon.spawning.resume import (
 from theater.harness import get as get_harness
 from theater.harness.base import LaunchPlan, ResumeLaunchOverlay
 from theater.harness.contracts.channels import ChannelKind
-from theater.harness.contracts.runtime import RuntimeHost, RuntimeLifecyclePhase, RuntimeWiring
+from theater.harness.contracts.runtime import (
+    ConnectionHealth,
+    RuntimeHost,
+    RuntimeLifecyclePhase,
+    RuntimeWiring,
+)
 from theater.models import (
     BadRequest,
     Participant,
@@ -150,10 +155,15 @@ class Spawner:
         native: NativeSpawnSelection | None,
     ) -> tuple[LaunchPlan, NativeSpawnSelection | None, LaunchPlan | None]:
         detached = native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND
+        owns_completion = (
+            native is not None
+            and native.runtime.host is RuntimeHost.FRONTEND
+            and native.runtime.channel.drives_job_completion
+        )
         fallback_plan: LaunchPlan | None = None
         try:
             plan = await self._build_plan(
-                req,
+                replace(req, prompt="") if owns_completion else req,
                 participant,
                 resume_overlay,
                 include_sidecars=not detached,
@@ -203,6 +213,8 @@ class Spawner:
                 participant.id,
                 exc,
             )
+            if owns_completion:
+                return await self._plan_for_wiring(req, participant, resume_overlay, harness, None)
             return legacy_plan, None, None
         self._persist_launch_intent(participant, req, native)
         return plan, native, legacy_plan
@@ -279,6 +291,7 @@ class Spawner:
                 runtime_manager=self.runtime_manager,
                 runtime_io=self.runtime_io,
                 live_hub=self.live_hub,
+                controls=self.controls,
                 store=self.registry.store,
                 participant=reservation.participant,
                 runtime=native.runtime,
@@ -293,17 +306,7 @@ class Spawner:
                 ),
             )
         except Exception:
-            await self._close_frontend_launch(reservation.participant.id)
-            self.registry.store.delete_runtime_binding(reservation.participant.id)
-            if reservation.legacy_plan is None:
-                raise
-            fallback = replace(
-                reservation,
-                plan=reservation.legacy_plan,
-                native=None,
-                legacy_plan=None,
-            )
-            return await self._launch_terminal(fallback)
+            return await self._fallback_frontend(reservation)
         try:
             attached = await self._launch_terminal(reservation)
         except ProviderLaunchOutcome as exc:
@@ -313,6 +316,22 @@ class Spawner:
         except BaseException:
             await self._close_frontend_launch(reservation.participant.id)
             raise
+        if native.runtime.channel.drives_job_completion:
+            try:
+                await self._ready_frontend(attached.id)
+            except Exception:
+                return await self._fallback_frontend(reservation, attached=attached)
+            # Beyond this point native submission may have happened: never retry through the pane.
+            if reservation.req.prompt:
+                if self.controls is None:
+                    raise BadRequest("completion-owning frontend requires the control service")
+                await self.controls.send(
+                    attached.id,
+                    caller_id=reservation.req.parent_id or "cli",
+                    prompt=reservation.req.prompt,
+                    response_format=reservation.req.response_format,
+                    job_handle=attached.id,
+                )
         phase = (
             RuntimeLifecyclePhase.ACTIVE
             if reservation.req.prompt
@@ -326,6 +345,64 @@ class Spawner:
         ):
             await self._close_frontend_launch(reservation.participant.id)
             raise TheaterError("frontend runtime binding changed during terminal launch")
+        return attached
+
+    async def _ready_frontend(self, participant_id: str) -> None:
+        await self.frontend_runtime_host.wait_ready(participant_id, timeout=15.0)
+        instance = self.runtime_manager.get(participant_id)
+        if instance is None:
+            raise TheaterError("frontend runtime disappeared before initial dispatch")
+        snapshot = await instance.snapshot()
+        if snapshot.health is not ConnectionHealth.CONNECTED:
+            raise TheaterError("frontend runtime did not establish a usable native scope")
+
+    async def _fallback_frontend(
+        self, reservation: Reservation, *, attached: Participant | None = None
+    ) -> Participant:
+        native = reservation.native
+        assert native is not None
+        owns_completion = native.runtime.channel.drives_job_completion
+        participant_id = reservation.participant.id
+        # Fallback is startup-only, before any native operation can own a job.
+        binding = self.registry.store.get_runtime_binding(participant_id)
+        current = self.registry.store.get_participant(participant_id)
+        if (
+            binding is None
+            or binding.backend_generation != native.backend_generation
+            or current is None
+            or current.session_id != reservation.participant.session_id
+            or (
+                owns_completion
+                and self.live_hub is not None
+                and self.live_hub.registration_for(participant_id) is not None
+            )
+            or any(
+                self.registry.store.control_operations_for_job(job.handle)
+                for job in self.registry.store.active_running_jobs_for_target(participant_id)
+            )
+        ):
+            raise TheaterError("frontend startup changed scope or accepted work; refusing fallback")
+        if reservation.legacy_plan is None:
+            raise TheaterError("frontend startup has no validated legacy fallback plan")
+        logger.warning(
+            "frontend startup for %s unavailable; using provider controls", participant_id
+        )
+        await self._close_frontend_launch(participant_id)
+        self.registry.store.delete_runtime_binding(participant_id)
+        if attached is None:
+            attached = await self._launch_terminal(
+                replace(reservation, plan=reservation.legacy_plan, native=None, legacy_plan=None)
+            )
+        if owns_completion and reservation.req.prompt:
+            if self.controls is None:
+                raise BadRequest("frontend fallback requires the control service")
+            await self.controls.send(
+                attached.id,
+                caller_id=reservation.req.parent_id or "cli",
+                prompt=reservation.req.prompt,
+                response_format=reservation.req.response_format,
+                job_handle=attached.id,
+            )
         return attached
 
     async def _launch_terminal(self, reservation: Reservation) -> Participant:
@@ -564,6 +641,7 @@ class Spawner:
             {
                 "runtime_host": native.runtime.host.value,
                 "control_routes": manifest_control_routes(native.runtime),
+                "drives_job_completion": native.runtime.channel.drives_job_completion,
                 **{
                     key: value
                     for key, value in (

@@ -18,6 +18,7 @@ from theater.daemon.spawning.runtime_identity import (
 from theater.harness import get as get_harness
 from theater.harness.contracts.channels import ChannelKind
 from theater.harness.contracts.runtime import (
+    ConnectionHealth,
     RuntimeBinding,
     RuntimeContext,
     RuntimeHost,
@@ -37,6 +38,7 @@ class _FrontendServices:
     runtime_io: Any
     live_hub: Any
     store: Any
+    controls: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,12 +138,14 @@ class _FrontendListener:
                 self.config.generation,
                 opened_binding.native_session_id,
             )
-            bind_runtime_identity(
-                self.services.store,
-                participant_id,
-                opened_binding,
-                self.config.generation,
-            )
+            # A reconnect may only retain evidence for a departed native scope.
+            if snapshot.health is ConnectionHealth.CONNECTED:
+                bind_runtime_identity(
+                    self.services.store,
+                    participant_id,
+                    opened_binding,
+                    self.config.generation,
+                )
             if not self.services.runtime_manager.record_snapshot(
                 participant_id, instance, snapshot
             ):
@@ -164,8 +168,18 @@ class _FrontendListener:
                     channel=self.config.runtime.channel,
                     backend_generation=self.config.generation,
                     native_session_id=opened_binding.native_session_id,
-                    evidence_sink=None,
-                    active_job_for_turn=None,
+                    evidence_sink=(
+                        self.services.controls.record_terminal_evidence
+                        if self.config.runtime.channel.drives_job_completion
+                        and self.services.controls is not None
+                        else None
+                    ),
+                    active_job_for_turn=(
+                        self.services.controls.active_job_for_native_turn
+                        if self.config.runtime.channel.drives_job_completion
+                        and self.services.controls is not None
+                        else None
+                    ),
                 )
             )
 
@@ -199,7 +213,11 @@ class _FrontendListener:
     async def discard(self, instance, source) -> None:
         if self.services.live_hub is not None:
             registration = self.services.live_hub.registration_for(self.config.participant.id)
-            if registration is not None and registration.live_source is source:
+            if (
+                registration is not None
+                and registration.live_source is source
+                and not registration.channel.drives_job_completion
+            ):
                 self.services.live_hub.unregister(self.config.participant.id)
         if self.services.runtime_manager.get(self.config.participant.id) is instance:
             await self.services.runtime_manager.close(self.config.participant.id)
@@ -226,13 +244,14 @@ async def start_frontend_listener(
     reasoning_effort: str | None,
     token: str,
     operation_id: str | None = None,
+    controls=None,
 ) -> None:
     """Start a listener; a stock UI connection creates the live runtime."""
     if runtime.host is not RuntimeHost.FRONTEND:
         raise BadRequest("frontend listener requires a frontend runtime manifest")
     if endpoint is None:
         raise BadRequest("frontend listener requires the daemon-selected endpoint")
-    services = _FrontendServices(host, runtime_manager, runtime_io, live_hub, store)
+    services = _FrontendServices(host, runtime_manager, runtime_io, live_hub, store, controls)
     config = _FrontendConfig(
         participant,
         runtime,
@@ -286,6 +305,7 @@ async def restore_frontend_listener(daemon, binding, participant: Participant) -
         model=_optional_text(policy, "model"),
         reasoning_effort=_optional_text(policy, "reasoning_effort"),
         token=credential.token,
+        controls=daemon.controls,
     )
     return True
 

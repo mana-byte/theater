@@ -7,6 +7,8 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -53,7 +55,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
-from theater.models import Status
+from theater.models import Status, TheaterError
 
 
 async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
@@ -496,6 +498,7 @@ class _FrontendHarness(Harness):
     def __init__(self, *, fail_install: bool = False, native_session_id: str | None = None) -> None:
         self.observer = _Observer()
         self.fail_install = fail_install
+        self.planned_prompts = []
         self.runtime = RuntimeManifest(
             probe=lambda context: RuntimeCompatibility(
                 supported=True,
@@ -538,6 +541,7 @@ class _FrontendHarness(Harness):
         mcp_servers=(),
     ) -> LaunchPlan:
         del config_path, approval, model, mcp_servers
+        self.planned_prompts.append(prompt)
         return LaunchPlan(
             argv=[self.binary, "-c", "pass"],
             receipt_token_path=paths.participant_observation_dir(participant_id, self.name)
@@ -779,4 +783,83 @@ async def test_listener_start_failure_falls_back_before_the_pane_launch(
         assert len(terminal_provider.creations) == 1
         assert "FRONTEND_TEST" not in terminal_provider.creations[0]["env"]
     finally:
+        await daemon.aclose()
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_completion_frontend_initial_dispatch_and_startup_fallback(
+    terminal_provider, monkeypatch, connected
+):
+    harness = _FrontendHarness(native_session_id="frontend-session-a")
+    harness.runtime = replace(
+        harness.runtime,
+        channel=replace(harness.runtime.channel, drives_job_completion=True),
+        legacy_fallback=frozenset(),
+    )
+    daemon = await _daemon(harness)
+    sent = []
+
+    async def send(participant_id, **kwargs):
+        route = daemon.controls.route_for(participant_id, RuntimeCapability.SEND)
+        sent.append((participant_id, kwargs, route.is_native))
+
+    monkeypatch.setattr(daemon.controls, "send", send)
+    if not connected:
+        monkeypatch.setattr(
+            daemon.frontend_runtime_host, "wait_ready", AsyncMock(side_effect=TimeoutError)
+        )
+    writer = None
+    task = asyncio.create_task(_spawn(daemon, _request()))
+    try:
+        if connected:
+            await wait_until(lambda: bool(terminal_provider.creations), what="promptless UI")
+            participant = daemon.registry.list()[0]
+            binding = daemon.store.get_runtime_binding(participant.id)
+            credential = daemon.store.get_channel_credential(
+                participant.id, ChannelKind.LIVE, "frontend-live"
+            )
+            _, writer = await _connect(binding.endpoint, credential.token)
+        participant = await task
+        assert harness.planned_prompts == [""]
+        assert len(terminal_provider.creations) == 1
+        assert sent == [
+            (
+                participant.id,
+                {
+                    "caller_id": "cli",
+                    "prompt": "stock prompt",
+                    "response_format": None,
+                    "job_handle": participant.id,
+                },
+                connected,
+            )
+        ]
+        if connected:
+            binding = daemon.store.get_runtime_binding(participant.id)
+            assert json.loads(binding.launch_policy)["drives_job_completion"] is True
+            registration = daemon.observer.live.registration_for(participant.id)
+            assert registration.evidence_sink == daemon.controls.record_terminal_evidence
+            assert registration.active_job_for_turn == daemon.controls.active_job_for_native_turn
+            # Even after all jobs ended, an activated native scope cannot fall back into the pane.
+            with pytest.raises(TheaterError, match="refusing fallback"):
+                await daemon.spawner._fallback_frontend(
+                    SimpleNamespace(
+                        participant=participant,
+                        native=SimpleNamespace(runtime=harness.runtime, backend_generation=1),
+                    )
+                )
+            await _close(writer)
+            writer = None
+            await wait_until(
+                lambda: daemon.runtime_manager.get(participant.id) is None,
+                what="frontend disconnect",
+            )
+            assert daemon.observer.live.registration_for(participant.id) is registration
+        else:
+            assert daemon.store.get_runtime_binding(participant.id) is None
+    finally:
+        if writer:
+            await _close(writer)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         await daemon.aclose()

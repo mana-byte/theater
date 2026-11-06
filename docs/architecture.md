@@ -1211,9 +1211,9 @@ compatibility probe, a per-participant runtime factory, and one declared live
 channel. A detached host adds a pure backend planner; a frontend host adds a
 passive extension overlay for the ordinary launch. The field is `None` for
 every harness that predates it, and `None` preserves legacy behaviour exactly.
-Codex, opencode, and pi declare it — the detached control host, passive
-frontend observation, and the public extension respectively — while Claude's
-native surface is its hook observations and Vibe stays legacy; see
+Codex and opencode use detached hosts; Pi and Claude use stock-frontend extensions.
+Claude's extension owns exact native completion as well as send and interrupt;
+its transcript remains the content/history source. Vibe stays legacy; see
 [§14](#14-native-runtime-wiring).
 
 ---
@@ -1724,8 +1724,9 @@ a private per-participant connection or a passive frontend extension while
 the stock native CLI UI stays attached to the same live session. Codex uses
 the detached app-server; OpenCode uses an authenticated detached server with a
 stock attached UI. Pi uses its public extension for send, interrupt, lifecycle,
-and confirmed thinking updates. Claude adds passive tool and main-session command-hook
-observations but retains legacy controls and transcript completion; Vibe stays legacy.
+and confirmed thinking updates. Claude uses a launch-local function-hook plugin for
+native send, exact-turn interrupt and completion, while keeping its stock UI and
+command-hook observations. Vibe stays legacy.
 
 **MCP's constraint still holds.** MCP remains outbound-only (§1): a server
 still cannot wake an agent, and nothing here changes that. Native runtime
@@ -1818,6 +1819,27 @@ runtime credential, and binding — and may start the already-validated ordinary
 launch.
 A cancellation never falls back. A failure after dispatch may have begun preserves
 everything and exposes the uncertain outcome; no prompt is resent across that boundary.
+
+### Completion-owning frontend launch
+
+Claude's frontend overlay installs private launch-local plugin files and `--plugin-dir`
+arguments. The daemon launches the ordinary UI without an argv prompt, authenticates the
+extension's bounded HTTP exchanges on its private Unix socket, and waits for a usable native
+session before dispatching the spawn prompt through the existing control service. Pi's
+passive frontend keeps its ordinary launch sequence and newline-JSON transport.
+
+Unavailable native startup can select the provider route only before native activation or
+submission. An established route never replays a possibly accepted command into the pane.
+Disconnecting a completion-owning frontend preserves its observation registration. The same
+ownership is pinned in the existing launch-policy JSON, so a new daemon suppresses transcript
+heuristics even before the frontend reconnects. Losing transport cannot transfer completion
+authority to transcript or screen heuristics.
+
+The Claude plugin correlates only a unique main-loop turn begun inside its native submission
+call. It journals bounded, unacknowledged outcomes and deletes them only after the daemon's
+evidence sink commits. Hybrid sources forward that acknowledgement to their live source.
+On restart, the same UI reconnects and supplies exact outcomes, not replayed prompts. A manual
+conversation switch invalidates the old control scope rather than redirecting its queue.
 
 ### Detached backend survival and reconnect
 
