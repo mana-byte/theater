@@ -59,8 +59,8 @@ from theater.models import Status
 async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
     sent = asyncio.Queue()
 
-    async def send(payload):
-        sent.put_nowait(json.loads(payload))
+    async def send(frame, _payload):
+        sent.put_nowait(frame)
 
     requests = FrontendRequests(send)
     first = asyncio.create_task(requests.request("pi.snapshot", {}, timeout=1))
@@ -85,8 +85,8 @@ async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
 async def test_frontend_request_timeout_discards_late_reply_without_replay():
     sent = []
 
-    async def send(payload):
-        sent.append(json.loads(payload))
+    async def send(frame, _payload):
+        sent.append(frame)
 
     requests = FrontendRequests(send)
     with pytest.raises(RuntimeRequestTimeout):
@@ -100,8 +100,8 @@ async def test_frontend_request_timeout_discards_late_reply_without_replay():
 async def test_frontend_close_fails_requests_on_old_peer():
     sent = asyncio.Queue()
 
-    async def send(payload):
-        sent.put_nowait(json.loads(payload))
+    async def send(frame, _payload):
+        sent.put_nowait(frame)
 
     requests = FrontendRequests(send)
     task = asyncio.create_task(requests.request("pi.settings.update", {}, timeout=1))
@@ -115,7 +115,7 @@ async def test_frontend_close_fails_requests_on_old_peer():
 
 
 async def test_frontend_oversized_request_is_rejected_before_transmission():
-    async def send(_payload):
+    async def send(_frame, _payload):
         pytest.fail("oversized request must not reach the writer")
 
     requests = FrontendRequests(send)

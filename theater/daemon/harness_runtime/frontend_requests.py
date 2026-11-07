@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 
@@ -23,8 +24,12 @@ FRONTEND_REQUEST_MAX_PENDING = 32
 FRONTEND_REQUEST_MAX_BYTES = 65536
 FRONTEND_REQUEST_ID_MAX_CHARS = 512
 
+#: Delivers one request frame: its mapping plus the exact serialized payload.
+FrameSender = Callable[[Mapping[str, object], bytes], Awaitable[None]]
 
-def _json_default(value):
+
+def json_default(value: object) -> dict[str, object]:
+    """Encode mappings; anything non-JSON fails at serialization time."""
     if isinstance(value, Mapping):
         return dict(value)
     raise TypeError("frontend requests must contain JSON values")
@@ -36,7 +41,8 @@ class FrontendRequests:
     Sent once; a possibly applied mutation is never replayed or moved to another peer.
     """
 
-    def __init__(self, send_frame: Callable[[bytes], Awaitable[None]]) -> None:
+    def __init__(self, send_frame: FrameSender, *, include_deadline: bool = False) -> None:
+        self._include_deadline = include_deadline
         self._send_frame = send_frame
         self._pending: dict[str, asyncio.Future[Mapping[str, object]]] = {}
         self._closed = False
@@ -55,13 +61,21 @@ class FrontendRequests:
         if len(self._pending) >= FRONTEND_REQUEST_MAX_PENDING:
             raise RuntimeConnectionSaturated("frontend pending request limit reached")
         request_id = uuid.uuid4().hex
+        frame: dict[str, object] = {
+            "type": "request",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        if self._include_deadline:
+            frame["deadline_ms"] = int((time.time() + timeout) * 1000)
         payload = (
             json.dumps(
-                {"type": "request", "id": request_id, "method": method, "params": params},
+                frame,
                 separators=(",", ":"),
                 ensure_ascii=False,
                 allow_nan=False,
-                default=_json_default,
+                default=json_default,
             ).encode("utf-8")
             + b"\n"
         )
@@ -71,7 +85,7 @@ class FrontendRequests:
         self._pending[request_id] = future
         try:
             async with asyncio.timeout(timeout):
-                await self._send_frame(payload)
+                await self._send_frame(frame, payload)
                 return await future
         except TimeoutError as exc:
             raise RuntimeRequestTimeout(
@@ -86,6 +100,11 @@ class FrontendRequests:
                 # awaiting backpressure. Consume that exception on timeout or
                 # cancellation too, so it cannot become an unhandled future.
                 future.exception()
+
+    def pending(self, request_id: str) -> bool:
+        """An expired queued transport frame must never be delivered later."""
+        future = self._pending.get(request_id)
+        return future is not None and not future.done()
 
     def receive(self, frame: Mapping[str, object]) -> bool:
         """Accept a matching response, or ignore an expired/duplicate id."""
@@ -127,4 +146,4 @@ class FrontendRequests:
                 future.set_exception(RuntimeConnectionClosed("frontend connection was lost"))
 
 
-__all__ = ["FrontendRequests"]
+__all__ = ["FrameSender", "FrontendRequests", "json_default"]
