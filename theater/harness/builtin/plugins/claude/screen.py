@@ -26,19 +26,21 @@ _MODE_LINE_PAIRS = (
     ("⏸", ("plan mode", "manual mode")),
     ("⏵⏵", ("accept edits", "bypass permissions", "don't ask", "auto mode")),
 )
-#: Composed at import: the footer is symbol + indicator + optional " on"
-#: + optional parenthesized hint, so the regex is built from the pairs.
+#: Joined symbol + indicator alternatives, shared by both footer shapes.
+_MODE_LINE_SYMBOLS = "|".join(
+    rf"{re.escape(symbol)} (?:" + "|".join(re.escape(indicator) for indicator in indicators) + r")"
+    for symbol, indicators in _MODE_LINE_PAIRS
+)
+#: Composed at import: the plain footer is symbol + indicator + optional " on"
+#: + optional hint; the agent-count footer adds the fixed "· ← N agents" tail.
 _MODE_LINE_RE = re.compile(
     r"^(?:(?:"
-    + "|".join(
-        rf"{re.escape(symbol)} (?:"
-        + "|".join(re.escape(indicator) for indicator in indicators)
-        + r")"
-        for symbol, indicators in _MODE_LINE_PAIRS
-    )
+    + _MODE_LINE_SYMBOLS
     + r")(?: on)?(?: \([^()]*\))?"
-    + r"|⏵⏵ bypass permissions on \(shift\+tab to cycle\) · ← \d+ agents?"
-    + r"[ \t]+new task\? /clear to save \d+(?:\.\d+)?k tokens)$"
+    + r"|(?:"
+    + _MODE_LINE_SYMBOLS
+    + r") on \(shift\+tab to cycle\) · ← \d+ agents?"
+    + r"(?:[ \t]+new task\? /clear to save \d+(?:\.\d+)?k tokens)?)$"
 )
 
 

@@ -9,6 +9,7 @@ import pytest
 from tests.support.claude_screens import (
     CLAUDE_APPROVAL,
     CLAUDE_IDLE,
+    CLAUDE_IDLE_AGENT_FOOTER,
     CLAUDE_IDLE_TASK_FOOTER,
     CLAUDE_TRUST,
 )
@@ -244,6 +245,11 @@ def test_claude_manual_mode_agents_footer_classifies_as_prompt():
         "⏵⏵ auto mode on (shift+tab to cycle)",
         "⏵⏵ bypass permissions on",
         CLAUDE_IDLE_TASK_FOOTER,
+        CLAUDE_IDLE_TASK_FOOTER.replace("bypass permissions", "accept edits"),
+        CLAUDE_IDLE_AGENT_FOOTER,
+        CLAUDE_IDLE_AGENT_FOOTER.replace("1 agent", "2 agents"),
+        # Claude 2.1.312 renders the agent count in plan mode too.
+        "⏸ plan mode on (shift+tab to cycle) · ← 1 agent",
         "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents"
         "  new task? /clear to save 33k tokens",
     ],
@@ -259,10 +265,8 @@ def test_claude_mode_line_footer_family_classifies_as_prompt(footer):
 @pytest.mark.parametrize(
     "footer",
     [
-        CLAUDE_IDLE_TASK_FOOTER.split("new task?")[0].rstrip(),
         CLAUDE_IDLE_TASK_FOOTER.replace(" · ← 1 agent", ""),
         CLAUDE_IDLE_TASK_FOOTER.replace("⏵⏵", "⏸"),
-        CLAUDE_IDLE_TASK_FOOTER.replace("bypass permissions", "accept edits"),
         CLAUDE_IDLE_TASK_FOOTER.replace("122.3k tokens", "122 tokens"),
         CLAUDE_IDLE_TASK_FOOTER.replace("shift+tab to cycle", "escape to stop"),
         CLAUDE_IDLE_TASK_FOOTER + " trailing prose",
