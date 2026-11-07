@@ -1003,6 +1003,9 @@ interfaces are:
   snapshot after runtime close: reconnect persists it before replacing the
   live registration, and retries on persistence failure. Sources without
   an unread native evidence buffer inherit the empty snapshot.
+- `Source.active_native_turn_id()` — returns the live channel's current
+  native turn id (default `None`), so transcript events whose turn ids are
+  not native turn ids can still be credited to the running job.
 
 History-derived outcomes set `from_history=True`; optional `completed_at`
 is the native completion time in Unix seconds, never the time of ingestion.

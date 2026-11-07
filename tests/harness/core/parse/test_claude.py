@@ -380,3 +380,30 @@ def test_claude_trust_marker_does_not_match_remote_control_add_server_dialog():
     )
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is not ScreenKind.TRUST
+
+
+def test_claude_narrow_pane_bare_mode_line_is_not_a_prompt():
+    """At 40 columns the working footer is identical to the idle one (Claude 2.1.312)."""
+    separator = "─" * 40
+    capture = "\n".join(
+        [
+            "  slid downhill, and the terminus had",
+            "  crept back up the valley. The glacier",
+            separator,
+            "❯\u00a0",
+            separator,
+            "  ⏸ plan mode on (shift+tab to cycle)",
+        ]
+    )
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.UNKNOWN
+    assert reading.confidence is ScreenConfidence.LOW
+
+
+def test_claude_wide_pane_bare_mode_line_still_reads_prompt():
+    """Wide composer separators keep the bare footer as idle evidence."""
+    separator = "─" * 80
+    capture = "\n".join(["finished", "❯\u00a0", separator, "  ⏸ plan mode on (shift+tab to cycle)"])
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is ScreenKind.PROMPT
+    assert reading.confidence is ScreenConfidence.HIGH

@@ -328,6 +328,10 @@ class Source(ABC):
         """Return immutable participant-scoped channel health."""
         return ()
 
+    def active_native_turn_id(self) -> str | None:
+        """Return the live channel's current native turn id, if the source knows one."""
+        return None
+
     def source_checkpoint(self) -> str | None:
         """Return the last source point acknowledged as durable."""
         return None

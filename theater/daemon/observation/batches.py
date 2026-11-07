@@ -38,17 +38,28 @@ class BatchApplication:
 
         Fails closed to ``None`` rather than guessing.
         """
-        if registration is None or registration.active_job_for_turn is None:
+        if (
+            registration is None
+            or registration.active_job_for_turn is None
+            or registration.native_session_id is None
+        ):
             return None
-        if event.turn_id is None or registration.native_session_id is None:
-            return None
-        job = registration.active_job_for_turn(
-            pid,
-            backend_generation=registration.backend_generation,
-            native_session_id=registration.native_session_id,
-            native_turn_id=event.turn_id,
-        )
-        return job.handle if job is not None else None
+        # Some transcripts name messages rather than native turns, so fall back to the native
+        # turn the live source reports running.
+        # shortcut: a transcript event read after its turn ended could be credited to the next
+        # native turn.
+        for native_turn_id in (event.turn_id, registration.live_source.active_native_turn_id()):
+            if native_turn_id is None:
+                continue
+            job = registration.active_job_for_turn(
+                pid,
+                backend_generation=registration.backend_generation,
+                native_session_id=registration.native_session_id,
+                native_turn_id=native_turn_id,
+            )
+            if job is not None:
+                return job.handle
+        return None
 
     def _record_usage(self, pid: str, event: Event) -> bool:
         return self._reducer.record_usage(pid, event)
