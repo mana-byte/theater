@@ -807,8 +807,14 @@ class RuntimeFrontendOverlay:
 
     env: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     files: Mapping[Path, str] = field(default_factory=lambda: MappingProxyType({}))
+    args: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if isinstance(self.args, str) or any(
+            not isinstance(arg, str) or not arg or "\0" in arg for arg in self.args
+        ):
+            raise TypeError("runtime frontend arguments must be non-empty strings without NUL")
+        object.__setattr__(self, "args", tuple(self.args))
         if not isinstance(self.env, Mapping) or any(
             not isinstance(key, str) or not key or not isinstance(value, str)
             for key, value in self.env.items()

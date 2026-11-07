@@ -71,6 +71,9 @@ def _assert_theater_contents(artifacts: Iterable[Path]) -> None:
                 for path in (ROOT / "theater/harness/builtin/plugins").glob("*/compatibility.json")
             ),
             "theater/frontend/schemas/methods.json",
+            "theater/harness/builtin/plugins/claude/native_plugin/.claude-plugin/plugin.json",
+            "theater/harness/builtin/plugins/claude/native_plugin/hooks/hooks.json",
+            "theater/harness/builtin/plugins/claude/native_plugin/hooks/register.ts",
             "theater/harness/builtin/plugins/pi/theater_mcp_bridge.ts",
             "theater/harness/builtin/plugins/pi/pi_startup_filter.cjs",
             "theater/harness/builtin/plugins/opencode/assets/native_plugin.js",
