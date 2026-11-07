@@ -82,6 +82,9 @@ class ClaudeLiveSource(Source):
         if turns:
             self.runtime.acknowledge(turns)
 
+    def active_native_turn_id(self) -> str | None:
+        return self.runtime.current_snapshot().native_turn_id
+
     def health_snapshot(self) -> tuple[ChannelHealth, ...]:
         snapshot = self.runtime.current_snapshot()
         return (

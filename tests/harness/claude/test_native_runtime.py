@@ -249,3 +249,13 @@ async def test_stale_snapshot_cannot_replace_newer_active_state(runtime):
     await native.snapshot()
     peer.state.update(revision=2, state="idle", active_turn_id=None)
     assert (await native.snapshot()).native_turn_id == "t"
+
+
+async def test_live_source_reports_the_active_native_turn_only_when_connected(runtime):
+    native, peer = runtime
+    assert native.source.active_native_turn_id() is None
+    peer.state.update(revision=2, state="active", active_turn_id="turn-1")
+    await native.snapshot()
+    assert native.source.active_native_turn_id() == "turn-1"
+    peer._closed = True
+    assert native.source.active_native_turn_id() is None
