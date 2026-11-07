@@ -17,6 +17,7 @@ from theater import timing
 from theater.daemon import workers
 from theater.daemon.harness_runtime import wait_for_unix_endpoint
 from theater.daemon.observation.live import LiveRegistration
+from theater.daemon.spawning.frontend import send_spawn_prompt
 from theater.daemon.spawning.models import (
     NativeSpawnSelection,
     ProviderLaunchOutcome,
@@ -312,17 +313,8 @@ async def _launch_native_sequence(
 
     # ---- 8. the initial prompt exactly once, through the control service
     if req.prompt:
-        # ``job_handle`` binds the spawn RPC's job (its handle is the
-        # participant id) to the native terminal evidence the runtime will
-        # report, so no second send job exists.
         attempt.dispatch_started = True
-        await spawner.controls.send(
-            pid,
-            caller_id=req.parent_id or "cli",
-            prompt=req.prompt,
-            response_format=req.response_format,
-            job_handle=pid,
-        )
+        await send_spawn_prompt(spawner, reservation, pid)
         if not store.set_runtime_lifecycle(
             pid,
             RuntimeLifecyclePhase.ACTIVE,

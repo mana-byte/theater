@@ -52,7 +52,8 @@ async def test_a_resumed_participant_continues_its_conversation(live, obligation
     code = job.error.code if job.error is not None else None
     assert answered, f"the resumed send answered {job.result!r}; error {code}{seen}"
     (resumed,) = live.turns(prompt)
-    assert all(previous in resumed.user_texts for previous in prompts), (
+    # Native extensions may wrap the prompt; every unique nonce must still reach the model.
+    assert all(any(previous in text for text in resumed.user_texts) for previous in prompts), (
         "the resumed conversation lost its history"
     )
     successor = await live.participant(second)
