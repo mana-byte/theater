@@ -198,6 +198,7 @@ async def test_passive_frontend_keeps_truthy_string_selection(monkeypatch, raw, 
         runtime_manager=None,
         runtime_io=None,
         observer=SimpleNamespace(live=None),
+        controls=object(),
     )
     binding = SimpleNamespace(
         harness="fixture",
@@ -206,4 +207,5 @@ async def test_passive_frontend_keeps_truthy_string_selection(monkeypatch, raw, 
         backend_generation=1,
     )
     assert await frontend.restore_frontend_listener(daemon, binding, SimpleNamespace(id="p1"))
+    assert captured["controls"] is daemon.controls
     assert (captured["approval"], captured["model"], captured["reasoning_effort"]) == expected

@@ -1211,9 +1211,9 @@ compatibility probe, a per-participant runtime factory, and one declared live
 channel. A detached host adds a pure backend planner; a frontend host adds a
 passive extension overlay for the ordinary launch. The field is `None` for
 every harness that predates it, and `None` preserves legacy behaviour exactly.
-Codex, opencode, and pi declare it — the detached control host, passive
-frontend observation, and the public extension respectively — while Claude's
-native surface is its hook observations and Vibe stays legacy; see
+Codex and opencode use detached hosts; Pi and Claude use stock-frontend extensions.
+Claude's extension owns exact native completion as well as send and interrupt;
+its transcript remains the content/history source. Vibe stays legacy; see
 [§14](#14-native-runtime-wiring).
 
 ---
@@ -1724,8 +1724,9 @@ a private per-participant connection or a passive frontend extension while
 the stock native CLI UI stays attached to the same live session. Codex uses
 the detached app-server; OpenCode uses an authenticated detached server with a
 stock attached UI. Pi uses its public extension for send, interrupt, lifecycle,
-and confirmed thinking updates. Claude adds passive tool and main-session command-hook
-observations but retains legacy controls and transcript completion; Vibe stays legacy.
+and confirmed thinking updates. Claude uses a launch-local function-hook plugin for
+native send, exact-turn interrupt and completion, while keeping its stock UI and
+command-hook observations. Vibe stays legacy.
 
 **MCP's constraint still holds.** MCP remains outbound-only (§1): a server
 still cannot wake an agent, and nothing here changes that. Native runtime
@@ -1818,6 +1819,48 @@ runtime credential, and binding — and may start the already-validated ordinary
 launch.
 A cancellation never falls back. A failure after dispatch may have begun preserves
 everything and exposes the uncertain outcome; no prompt is resent across that boundary.
+
+### Completion-owning frontend launch
+
+Claude's frontend overlay installs private launch-local plugin files and `--plugin-dir`
+arguments. The daemon launches the ordinary UI without an argv prompt, authenticates the
+extension's bounded HTTP exchanges on its private Unix socket, and waits for a usable native
+session (a bounded readiness wait) before dispatching the spawn prompt through the existing
+control service. Pi's passive frontend keeps its ordinary launch sequence and newline-JSON
+transport.
+
+Native Claude prompts are plugin-submitted. Verified on Claude 2.1.312, the model receives:
+
+```
+The theater-native-control plugin sent a message:
+<prompt>
+
+This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this
+turn in the user's place. Address the message above.
+```
+
+The `wiring="legacy"` option keeps pane delivery as the user's own turn.
+
+Fallback is startup-only, in two cases. A planning-time frontend setup failure re-plans an
+ordinary legacy launch with the argv prompt — nothing has been launched yet. Once the
+promptless launch is committed, a fallback keeps that UI and delivers the spawn prompt
+through the provider route as soon as its composer is ready, within a bounded deadline: the
+route refuses with `Busy`/`AwaitingDecision` until then, a refused attempt leaves nothing
+durable, and the daemon retries those temporary refusals. A UI held by a human-only dialog
+(e.g. workspace trust) past the deadline fails the spawn instead of waiting indefinitely.
+An established native route never replays a possibly accepted command into the pane.
+Disconnecting a completion-owning frontend preserves its observation registration, and the
+same ownership is pinned in the existing launch-policy JSON, so a new daemon suppresses
+transcript heuristics even before the frontend reconnects. Losing transport cannot transfer
+completion authority to transcript or screen heuristics.
+
+The plugin refuses a send while another prompt is entering, and owns only a unique main-loop
+turn that starts from its submitted text inside the submission call. It journals bounded,
+unacknowledged outcomes into the participant's Theater directory — never Claude's shared
+plugin store — and deletes them only after the daemon's evidence sink commits. Hybrid sources
+forward that acknowledgement to their live source. On restart, the same UI reconnects and
+supplies exact outcomes, not replayed prompts. A manual conversation switch invalidates the
+old control scope rather than redirecting its queue.
 
 ### Detached backend survival and reconnect
 

@@ -734,3 +734,33 @@ def test_ack_terminal_evidence_tolerates_default_and_raising_sources(caplog):
         observer._ack_terminal_evidence(_RaisingDelivered())
 
     assert "releasing terminal evidence failed" in caplog.text
+
+
+@pytest.mark.parametrize("owns_completion", [False, True])
+def test_restart_keeps_persisted_completion_owner_before_frontend_reconnect(
+    registry, owns_completion
+):
+    from tests.support.observation import poised
+    from theater.daemon.persistence.repositories.runtime_bindings import (
+        ParticipantRuntimeBinding,
+        encode_launch_policy,
+    )
+    from theater.harness.contracts.runtime import RuntimeLifecyclePhase, RuntimeWiring
+
+    observer, _, _, participant, _ = poised(registry, provider_bound=False)
+    registry.store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id=participant.id,
+            harness=participant.harness,
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=1,
+            lifecycle=RuntimeLifecyclePhase.ACTIVE,
+            native_session_id="native-session",
+            launch_policy=encode_launch_policy({"drives_job_completion": owns_completion}),
+        )
+    )
+    assert observer.live.registration_for(participant.id) is None
+    observer._finish("h1", "a transcript answer seen before the native bridge reconnects")
+    assert registry.store.get_job("h1").state == (
+        JobState.RUNNING if owns_completion else JobState.DONE
+    )

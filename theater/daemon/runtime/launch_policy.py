@@ -36,6 +36,10 @@ class LaunchPolicyFacts:
         value = self.fields.get("control_routes")
         return value if isinstance(value, Mapping) else None
 
+    @property
+    def drives_job_completion(self) -> bool:
+        return self.fields.get("drives_job_completion") is True
+
 
 def decode_launch_policy(raw: str | None) -> LaunchPolicyFacts:
     """Read historical JSON without applying the stricter persistence-write validation."""

@@ -7,6 +7,8 @@ import json
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,6 +25,7 @@ from theater.daemon.harness_runtime.frontend import (
 from theater.daemon.harness_runtime.frontend_requests import FrontendRequests
 from theater.daemon.runtime.wiring import frontend_endpoint
 from theater.daemon.server import Daemon
+from theater.daemon.spawning import frontend as spawning_frontend
 from theater.daemon.spawning.models import SpawnRequest
 from theater.daemon.spawning.provider_launch import ParticipantLaunchService
 from theater.harness import HARNESSES, Harness
@@ -53,7 +56,7 @@ from theater.harness.contracts.runtime import (
     SessionOpenMode,
 )
 from theater.harness.observation import TranscriptObserver
-from theater.models import Status
+from theater.models import BadRequest, Busy, Status, TheaterError
 
 
 async def test_frontend_requests_correlate_out_of_order_and_remote_errors():
@@ -496,6 +499,7 @@ class _FrontendHarness(Harness):
     def __init__(self, *, fail_install: bool = False, native_session_id: str | None = None) -> None:
         self.observer = _Observer()
         self.fail_install = fail_install
+        self.planned_prompts = []
         self.runtime = RuntimeManifest(
             probe=lambda context: RuntimeCompatibility(
                 supported=True,
@@ -538,6 +542,7 @@ class _FrontendHarness(Harness):
         mcp_servers=(),
     ) -> LaunchPlan:
         del config_path, approval, model, mcp_servers
+        self.planned_prompts.append(prompt)
         return LaunchPlan(
             argv=[self.binary, "-c", "pass"],
             receipt_token_path=paths.participant_observation_dir(participant_id, self.name)
@@ -575,6 +580,16 @@ def _request() -> SpawnRequest:
         cwd="/tmp",
         approval="manual",
     )
+
+
+def _completion_owning_harness() -> _FrontendHarness:
+    harness = _FrontendHarness(native_session_id="frontend-session-a")
+    harness.runtime = replace(
+        harness.runtime,
+        channel=replace(harness.runtime.channel, drives_job_completion=True),
+        legacy_fallback=frozenset(),
+    )
+    return harness
 
 
 async def test_frontend_spawn_keeps_the_stock_plan_and_passive_binding(terminal_provider) -> None:
@@ -780,3 +795,170 @@ async def test_listener_start_failure_falls_back_before_the_pane_launch(
         assert "FRONTEND_TEST" not in terminal_provider.creations[0]["env"]
     finally:
         await daemon.aclose()
+
+
+@pytest.mark.parametrize("connected", [True, False])
+async def test_completion_frontend_initial_dispatch_and_startup_fallback(
+    terminal_provider, monkeypatch, connected
+):
+    harness = _completion_owning_harness()
+    daemon = await _daemon(harness)
+    sent = []
+
+    async def send(participant_id, **kwargs):
+        route = daemon.controls.route_for(participant_id, RuntimeCapability.SEND)
+        sent.append((participant_id, kwargs, route.is_native))
+
+    monkeypatch.setattr(daemon.controls, "send", send)
+    if not connected:
+        monkeypatch.setattr(
+            daemon.frontend_runtime_host, "wait_ready", AsyncMock(side_effect=TimeoutError)
+        )
+    writer = None
+    task = asyncio.create_task(_spawn(daemon, _request()))
+    try:
+        if connected:
+            await wait_until(lambda: bool(terminal_provider.creations), what="promptless UI")
+            participant = daemon.registry.list()[0]
+            binding = daemon.store.get_runtime_binding(participant.id)
+            credential = daemon.store.get_channel_credential(
+                participant.id, ChannelKind.LIVE, "frontend-live"
+            )
+            _, writer = await _connect(binding.endpoint, credential.token)
+        participant = await task
+        assert harness.planned_prompts == [""]
+        assert len(terminal_provider.creations) == 1
+        assert sent == [
+            (
+                participant.id,
+                {
+                    "caller_id": "cli",
+                    "prompt": "stock prompt",
+                    "response_format": None,
+                    "job_handle": participant.id,
+                },
+                connected,
+            )
+        ]
+        if connected:
+            binding = daemon.store.get_runtime_binding(participant.id)
+            assert json.loads(binding.launch_policy)["drives_job_completion"] is True
+            registration = daemon.observer.live.registration_for(participant.id)
+            assert registration.evidence_sink == daemon.controls.record_terminal_evidence
+            assert registration.active_job_for_turn == daemon.controls.active_job_for_native_turn
+            # Even after all jobs ended, an activated native scope cannot fall back into the pane.
+            with pytest.raises(TheaterError, match="refusing fallback"):
+                await spawning_frontend._fallback_frontend(
+                    daemon.spawner,
+                    SimpleNamespace(
+                        participant=participant,
+                        native=SimpleNamespace(runtime=harness.runtime, backend_generation=1),
+                    ),
+                )
+            await _close(writer)
+            writer = None
+            await wait_until(
+                lambda: daemon.runtime_manager.get(participant.id) is None,
+                what="frontend disconnect",
+            )
+            assert daemon.observer.live.registration_for(participant.id) is registration
+        else:
+            assert daemon.store.get_runtime_binding(participant.id) is None
+    finally:
+        if writer:
+            await _close(writer)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await daemon.aclose()
+
+
+async def test_completion_frontend_fallback_retries_a_refused_provider_send(
+    terminal_provider, monkeypatch
+) -> None:
+    terminal_provider.terminals.clear()
+    daemon = await _daemon(_completion_owning_harness())
+    attempts = []
+
+    async def send(participant_id, **kwargs):
+        attempts.append((participant_id, kwargs))
+        if len(attempts) < 3:
+            raise Busy("the terminal shows no ready composer yet")
+
+    monkeypatch.setattr(daemon.controls, "send", send)
+    monkeypatch.setattr(
+        daemon.frontend_runtime_host, "wait_ready", AsyncMock(side_effect=TimeoutError)
+    )
+    monkeypatch.setattr(spawning_frontend, "FALLBACK_PROMPT_POLL_SECONDS", 0.01)
+    try:
+        participant = await _spawn(daemon, _request())
+        assert [kwargs["prompt"] for _, kwargs in attempts] == ["stock prompt"] * 3
+        assert all(pid == participant.id for pid, _ in attempts)
+        assert attempts[-1][1]["job_handle"] == participant.id
+        assert daemon.store.get_runtime_binding(participant.id) is None
+    finally:
+        await daemon.aclose()
+
+
+async def test_completion_frontend_fallback_prompt_delivery_is_bounded(
+    terminal_provider, monkeypatch
+) -> None:
+    terminal_provider.terminals.clear()
+    daemon = await _daemon(_completion_owning_harness())
+    attempts = []
+
+    async def send(participant_id, **kwargs):
+        del participant_id, kwargs
+        attempts.append(1)
+        raise Busy("the terminal never shows a ready composer")
+
+    monkeypatch.setattr(daemon.controls, "send", send)
+    monkeypatch.setattr(
+        daemon.frontend_runtime_host, "wait_ready", AsyncMock(side_effect=TimeoutError)
+    )
+    monkeypatch.setattr(spawning_frontend, "FALLBACK_PROMPT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(spawning_frontend, "FALLBACK_PROMPT_DEADLINE_SECONDS", 0.05)
+    try:
+        accepted = await ParticipantLaunchService(daemon).spawn(
+            client_id="frontend-spawning-test",
+            idempotency_key="spawn-bounded-fallback",
+            params={
+                "harness": "frontend-test",
+                "prompt": "stock prompt",
+                "cwd": "/tmp",
+                "approval": "manual",
+            },
+        )
+        operation_id = str(accepted["operation_id"])
+
+        def _gave_up() -> bool:
+            return daemon.operation_service.get(operation_id).state == "uncertain"
+
+        await wait_until(_gave_up, what="the bounded fallback prompt delivery to give up")
+        assert len(attempts) >= 2  # temporary refusals were retried
+        assert len(attempts) <= 50  # and the named deadline bounded them
+    finally:
+        await daemon.aclose()
+
+
+async def test_completion_owning_listener_refuses_to_start_without_controls() -> None:
+    harness = _FrontendHarness()
+    runtime = replace(
+        harness.runtime, channel=replace(harness.runtime.channel, drives_job_completion=True)
+    )
+    with pytest.raises(BadRequest, match="control service"):
+        await spawning_frontend.start_frontend_listener(
+            host=object(),
+            runtime_manager=object(),
+            runtime_io=object(),
+            live_hub=None,
+            store=object(),
+            participant=SimpleNamespace(id="p1", cwd="/tmp"),
+            runtime=runtime,
+            generation=1,
+            endpoint="unix:///tmp/theater-test-frontend.sock",
+            approval=None,
+            model=None,
+            reasoning_effort=None,
+            token="token",
+            controls=None,
+        )

@@ -14,7 +14,7 @@ from theater.daemon.operations import (
     OperationOutcome,
 )
 from theater.daemon.registry import Registry
-from theater.daemon.spawning.frontend import start_frontend_listener
+from theater.daemon.spawning.frontend import completion_owning_frontend, launch_frontend
 from theater.daemon.spawning.hook_compatibility import probe_hook_channels
 from theater.daemon.spawning.models import (
     NativeSpawnSelection,
@@ -150,10 +150,11 @@ class Spawner:
         native: NativeSpawnSelection | None,
     ) -> tuple[LaunchPlan, NativeSpawnSelection | None, LaunchPlan | None]:
         detached = native is not None and native.runtime.host is RuntimeHost.DETACHED_BACKEND
+        owns_completion = native is not None and completion_owning_frontend(native.runtime)
         fallback_plan: LaunchPlan | None = None
         try:
             plan = await self._build_plan(
-                req,
+                replace(req, prompt="") if owns_completion else req,
                 participant,
                 resume_overlay,
                 include_sidecars=not detached,
@@ -203,6 +204,8 @@ class Spawner:
                 participant.id,
                 exc,
             )
+            if owns_completion:
+                return await self._plan_for_wiring(req, participant, resume_overlay, harness, None)
             return legacy_plan, None, None
         self._persist_launch_intent(participant, req, native)
         return plan, native, legacy_plan
@@ -223,7 +226,7 @@ class Spawner:
                 # it cleans nothing.
                 attached = await launch_native(self, reservation)
             elif reservation.native is not None:
-                attached = await self._launch_frontend(reservation)
+                attached = await launch_frontend(self, reservation)
             else:
                 attached = await self._launch_terminal(reservation)
         except BaseException:
@@ -255,77 +258,6 @@ class Spawner:
                 )
             except Exception:
                 logger.exception("could not record resume boundary for %s", participant.id)
-        return attached
-
-    async def _launch_frontend(self, reservation: Reservation) -> Participant:
-        native = reservation.native
-        assert native is not None
-        if (
-            self.frontend_runtime_host is None
-            or self.runtime_manager is None
-            or self.runtime_io is None
-        ):
-            raise BadRequest("frontend wiring requires the daemon frontend runtime host")
-        credential = self.registry.store.get_channel_credential(
-            reservation.participant.id,
-            ChannelKind.LIVE,
-            native.runtime.channel.channel.id,
-        )
-        if credential is None:
-            raise BadRequest("frontend wiring requires its launch channel credential")
-        try:
-            await start_frontend_listener(
-                host=self.frontend_runtime_host,
-                runtime_manager=self.runtime_manager,
-                runtime_io=self.runtime_io,
-                live_hub=self.live_hub,
-                store=self.registry.store,
-                participant=reservation.participant,
-                runtime=native.runtime,
-                generation=native.backend_generation,
-                endpoint=native.endpoint,
-                approval=reservation.req.approval,
-                model=reservation.req.model,
-                reasoning_effort=reservation.req.reasoning_effort,
-                token=credential.token,
-                operation_id=(
-                    reservation.provider.operation_id if reservation.provider is not None else None
-                ),
-            )
-        except Exception:
-            await self._close_frontend_launch(reservation.participant.id)
-            self.registry.store.delete_runtime_binding(reservation.participant.id)
-            if reservation.legacy_plan is None:
-                raise
-            fallback = replace(
-                reservation,
-                plan=reservation.legacy_plan,
-                native=None,
-                legacy_plan=None,
-            )
-            return await self._launch_terminal(fallback)
-        try:
-            attached = await self._launch_terminal(reservation)
-        except ProviderLaunchOutcome as exc:
-            if exc.outcome.state != "uncertain":
-                await self._close_frontend_launch(reservation.participant.id)
-            raise
-        except BaseException:
-            await self._close_frontend_launch(reservation.participant.id)
-            raise
-        phase = (
-            RuntimeLifecyclePhase.ACTIVE
-            if reservation.req.prompt
-            else RuntimeLifecyclePhase.ATTACHED
-        )
-        if not self.registry.store.set_runtime_lifecycle(
-            reservation.participant.id,
-            phase,
-            backend_generation=native.backend_generation,
-            updated_at=now(),
-        ):
-            await self._close_frontend_launch(reservation.participant.id)
-            raise TheaterError("frontend runtime binding changed during terminal launch")
         return attached
 
     async def _launch_terminal(self, reservation: Reservation) -> Participant:
@@ -564,6 +496,7 @@ class Spawner:
             {
                 "runtime_host": native.runtime.host.value,
                 "control_routes": manifest_control_routes(native.runtime),
+                "drives_job_completion": native.runtime.channel.drives_job_completion,
                 **{
                     key: value
                     for key, value in (

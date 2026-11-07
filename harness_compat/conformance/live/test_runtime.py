@@ -84,10 +84,13 @@ async def _survival(live, participant: str) -> None:
     running = [processes[pane], *process_table.detached_children(processes, live.daemon_pid)]
     answered = _foreground(live)
 
+    held = await live.hold_turn(participant, _nonce())
     await live.restart_daemon()
+    held.hold.release()
 
     _expect_running(running)
     await _reconnected(live, participant, route.native_session_id)
+    assert (await live.job(held.handle)).state == "done"
     await live.ready(participant)
     later = _nonce()
     live.queue(MockReply(later))
@@ -96,8 +99,10 @@ async def _survival(live, participant: str) -> None:
     assert job.state == "done", job.error
     assert later in str(job.result)
     (continued,) = live.turns(f"Reply with {later}")
-    assert f"Reply with {earlier}" in continued.user_texts, "the session lost its history"
-    assert _foreground(live) == answered + 1, "the model saw more than the one new request"
+    assert any(f"Reply with {earlier}" in text for text in continued.user_texts), (
+        "the session lost its history"
+    )
+    assert _foreground(live) == answered + 2, "the restart replayed a model request"
     assert len(live.turns(f"Reply with {earlier}")) == 1, "the earlier prompt was submitted again"
     _expect_running(running)
     if started := process_table.detached_children(process_table.table(), live.daemon_pid):
@@ -156,7 +161,15 @@ async def _queue(live, participant: str) -> None:
     assert repeated.job_handle == accepted.job_handle, "a retry minted another queued job"
     assert not live.turns(followup), "the follow-up reached the model before the held turn ended"
 
+    last_prompt, last_answer = _nonce(), _nonce()
+    last = (
+        await live.client.controls.queue_followup(
+            participant, last_prompt, idempotency_key=uuid.uuid4().hex
+        )
+    ).value
+    assert last.job_handle is not None
     live.queue(MockReply(answer))
+    live.queue(MockReply(last_answer))
     held.hold.release()
     original = await live.job(held.handle)
     queued = await live.job(accepted.job_handle)
@@ -164,9 +177,13 @@ async def _queue(live, participant: str) -> None:
     assert original.state == "done", original.error
     assert queued.state == "done", queued.error
     assert answer in str(queued.result)
+    final = await live.job(last.job_handle)
+    assert final.state == "done" and last_answer in str(final.result), final.error
     (first,) = live.turns(prompt)
     (second,) = live.turns(followup)
-    assert prompt in second.user_texts, "the follow-up lost the original turn's history"
+    assert any(prompt in text for text in second.user_texts), (
+        "the follow-up lost the original turn's history"
+    )
     assert second.messages > first.messages
 
 
