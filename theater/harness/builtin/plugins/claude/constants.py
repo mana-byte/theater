@@ -26,6 +26,10 @@ IDLE_FOOTER = "? for shortcuts"
 IDLE_AGENTS_FOOTER = "← for agents"
 MODE_LINE_PREFIXES = ("⏸", "⏵⏵")
 
+#: Below this pane width the bare mode-line footer is byte-identical to the
+#: idle footer (observed at 40 columns on Claude 2.1.312), so it proves nothing.
+NARROW_PANE_COLUMNS: Final = 50
+
 _SCREEN_TAIL_LINES = 6
 _CWD_PROBE_RECORDS = 20
 _CWD_PROBE_BYTES = 256 * 1024
