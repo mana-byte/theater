@@ -21,6 +21,9 @@ from regie.ui_constants import (
     REGIE_NAME_MIN_CELLS as NAME_MIN_CELLS,
 )
 from regie.ui_constants import (
+    REGIE_UNREAD_STYLE as UNREAD_STYLE,
+)
+from regie.ui_constants import (
     REGIE_WAITING_FRAMES as WAITING_FRAMES,
 )
 from regie.ui_constants import (
@@ -67,7 +70,7 @@ def status_glyph(
     if status == "idle":
         icon = node.get("icon")
         return (icon if isinstance(icon, str) and icon else harness_icon(node.get("harness"))), (
-            "$text-muted"
+            UNREAD_STYLE if node.get("unread") else "$text-muted"
         )
     # Unknown / unmanaged: honest "?" rather than guessing idle.
     return "?", "$text-muted"

@@ -81,6 +81,7 @@ class RawRenderNode(TypedDict, total=False):
     stage_reason: str
     usage_cost_microcents: int | None
     mark: RowMark | None
+    unread: bool
     hidden_count: int
     hidden_ids: list[str]
     hidden_status: str | None

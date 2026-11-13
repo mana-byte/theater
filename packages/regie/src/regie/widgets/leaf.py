@@ -114,6 +114,7 @@ class AgentLeaf(MarqueeMixin, WipeMixin):
         self._attention_level = 0
         self._waiting: str | None = None
         self._awaited = False
+        self._unread = False
         self._cost = CountingValue(_format_leaf_cost)
         self._cost.set_target(_microcents(node), animate=False)
         self._cost_sub: AnimationSubscription | None = None
@@ -139,8 +140,9 @@ class AgentLeaf(MarqueeMixin, WipeMixin):
         return reason if isinstance(reason, str) and reason else None
 
     def _render_label(self) -> Content:
+        node: LeafNode = {**self._node, "unread": True} if self._unread else self._node
         self._row2: Row2Layout = row2_layout(
-            self._node,
+            node,
             self._prefix,
             width=self._label_width(),
             frame=self._frame,
@@ -154,7 +156,7 @@ class AgentLeaf(MarqueeMixin, WipeMixin):
             renaming=self.renaming,
         )
         content = node_label(
-            self._node,
+            node,
             self._prefix,
             cont_prefix=self._cont_prefix,
             cwd_segments=self._cwd_segments,
@@ -176,6 +178,12 @@ class AgentLeaf(MarqueeMixin, WipeMixin):
             self._waiting, self._awaited = waiting, awaited
             if self._mounted:
                 self._sync_timer()
+            self.update(self._render_label(), layout=False)
+
+    def set_unread(self, unread: bool) -> None:
+        """Colour the glyph of an agent whose finished turn has gone unread."""
+        if unread != self._unread:
+            self._unread = unread
             self.update(self._render_label(), layout=False)
 
     @property

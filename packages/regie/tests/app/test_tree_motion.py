@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from types import MappingProxyType
 
-from regie.ui_constants import REGIE_ROUTE_COLORS, REGIE_WAITING_FRAMES
+from regie.ui_constants import REGIE_ROUTE_COLORS, REGIE_UNREAD_STYLE, REGIE_WAITING_FRAMES
 from regie.widgets import ParticipantTree
 from regie.widgets.leaf import AgentLeaf
 
@@ -53,6 +53,31 @@ async def test_a_status_change_sweeps_the_row_once_then_clears() -> None:
         assert _leaf(tree, "participant-2")._wipe is None
         await wait_until(pilot, lambda: leaf._wipe is None)
         assert tree._wipe_timer is None  # no timer outlives the sweep
+
+
+async def test_a_finished_turn_nobody_reads_recolours_its_glyph_until_the_cursor_lands(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("regie.widgets.tree_parts.motion.REGIE_UNREAD_SECONDS", 0.2)
+    app, _client, _presentation = build_app()
+
+    async with app.run_test() as pilot:
+        tree = app.query_one(ParticipantTree)
+        await wait_until(pilot, lambda: len(tree.participant_ids) == 2)
+        leaf = _leaf(tree, "participant-2")
+        assert tree.selected_id == "participant-1"
+
+        def recoloured() -> bool:
+            return any(str(span.style) == REGIE_UNREAD_STYLE for span in leaf._render_label().spans)
+
+        await _change(app, pilot, "participant-2", "working")
+        await _change(app, pilot, "participant-2", "idle")
+        assert not recoloured()
+        await wait_until(pilot, recoloured)
+
+        tree.select("participant-2")
+        await wait_until(pilot, lambda: not recoloured())
+        assert tree._unread_timer is None  # nothing left to wait for
 
 
 async def test_awaiting_input_holds_a_tint_until_it_is_answered() -> None:

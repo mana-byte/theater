@@ -174,6 +174,10 @@ REGIE_WIPE_TRAIL_ALPHA = 60
 REGIE_ATTENTION_PULSE_LIMIT = 3
 REGIE_ATTENTION_PULSE_INTERVAL = 0.4
 
+#: An agent that finished a turn nobody looked at for this long recolours its glyph.
+REGIE_UNREAD_SECONDS = 60.0
+REGIE_UNREAD_STYLE = "$success"
+
 #: A clock quadrant sweeping clockwise: an agent blocked on a peer, not computing. A second a
 #: glyph, so it never reads as work in progress.
 REGIE_WAITING_FRAMES = "◴◷◶◵"

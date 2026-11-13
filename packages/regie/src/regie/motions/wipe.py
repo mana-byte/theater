@@ -43,11 +43,15 @@ SWEEPS: dict[str, tuple[str, float | None]] = {
 }
 
 
+def finished_turn(previous: str, status: str) -> bool:
+    return previous == "working" and status == "idle"
+
+
 def status_sweep(previous: str, status: str) -> tuple[str, float | None] | None:
     """The sweep announcing a status change, or None when the change is not worth one."""
     if status in {"awaiting_input", "dead"}:
         return SWEEPS[status]
-    if previous == "working" and status == "idle":
+    if finished_turn(previous, status):
         return SWEEPS["finished"]
     return None
 
