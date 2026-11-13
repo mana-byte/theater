@@ -20,11 +20,13 @@ async def test_a_steer_follows_what_the_harness_declares(live, obligation):
     steer = f"Steer {uuid.uuid4().hex[:8]}"
     final = f"STEERED-{uuid.uuid4().hex[:8]}"
 
+    # Queue before steering: the steer preempts the held turn's request and resamples,
+    # so the reply must already be scripted when that request reaches the mock.
+    live.queue(MockReply(final))
     if obligation.detail == "refused":
         await _refused(live, participant, steer)
     else:
         await live.steer(participant, steer)
-    live.queue(MockReply(final))
     held.hold.release()
     job = await live.job(held.handle)
 
