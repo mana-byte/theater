@@ -40,6 +40,10 @@ if TYPE_CHECKING:
         _attention_since: dict[Key, float]
         _attention_phase: int
         _attention_timer: Timer | None
+        _finished_at: dict[Key, float]
+        _unread_timer: Timer | None
+        _cursor_visible: bool
+        _staged_id: str | None
         _mark_kinds: dict[str, MarkKind] | None
         _hidden_owner: dict[Key, Key]
         _kills: set[Key]

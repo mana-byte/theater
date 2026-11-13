@@ -9,12 +9,13 @@ from textual.widget import Widget
 
 from regie.marks import MarkKind, RowMark
 from regie.motions.retirement import LeafRetirementFrame
-from regie.motions.wipe import SWEEPS, status_sweep
+from regie.motions.wipe import SWEEPS, finished_turn, status_sweep
 from regie.render.layout import Key
 from regie.ui_constants import (
     REGIE_ATTENTION_PULSE_INTERVAL,
     REGIE_ATTENTION_PULSE_LIMIT,
     REGIE_STARTUP_REVEAL_INTERVAL_SECONDS,
+    REGIE_UNREAD_SECONDS,
     REGIE_WIPE_INTERVAL_SECONDS,
 )
 from regie.widgets.chrome import EmptyTreeState
@@ -210,14 +211,42 @@ class TreeMotion(_TreeBase):
                 target = self._hidden_owner.get(key, key)
                 if target == key or status in {"awaiting_input", "dead"}:
                     self._wipes.start(target, sweep[0], seconds=sweep[1])
+            if finished_turn(previous, status):
+                self._finished_at[key] = time.monotonic()
         now = time.monotonic()
         self._attention_since = {
             key: self._attention_since.get(key, now)
             for key, status in current.items()
             if status == "awaiting_input"
         }
+        self._finished_at = {
+            key: since for key, since in self._finished_at.items() if current.get(key) == "idle"
+        }
         self._statuses = current
         self._ensure_wipe_timer()
+
+    def _sync_unread(self) -> None:
+        """Recolour the glyph of each row whose finished turn went unread for a minute.
+
+        A row under the visible cursor or staged is being read, so its finish is forgotten.
+        """
+        self._finished_at.pop(("p", self._staged_id or ""), None)
+        if self._cursor_visible and self._selected_key is not None:
+            self._finished_at.pop(self._selected_key, None)
+        now = time.monotonic()
+        due = {
+            key for key, since in self._finished_at.items() if now - since >= REGIE_UNREAD_SECONDS
+        }
+        for key, widget in self._key_widgets.items():
+            if isinstance(widget, AgentLeaf):
+                widget.set_unread(key in due)
+        if self._unread_timer is not None:
+            self._unread_timer.stop()
+            self._unread_timer = None
+        if pending := [since for key, since in self._finished_at.items() if key not in due]:
+            self._unread_timer = self.set_timer(
+                min(pending) + REGIE_UNREAD_SECONDS - now, self._sync_unread
+            )
 
     def _observe_marks(self, marks: Mapping[str, RowMark]) -> None:
         """Sweep a row whose operation just produced something worth announcing.

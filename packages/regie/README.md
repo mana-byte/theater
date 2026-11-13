@@ -37,6 +37,8 @@ The tree is the whole interface; every signal is a state of something it already
   dead. A slow clock quadrant `◴◷◶◵`, a step every second, is an agent blocked on a peer, in the colour of that
   wait; a ring filling `○◔◑◕●` is a spawn starting, with the daemon's phase on the row's
   third line; `✕` is a kill in flight.
+  An idle agent's own glyph turns green when its finished turn has gone a minute without the
+  cursor on its row (or the row staged).
 - **Bar.** A `▌` in the gutter marks a row that needs you; the newest three breathe.
 - **Sweep.** A block with a fading trail runs across a row, in a colour that says what
   happened: cyan when the spawn row opens and green when the agent is up (or a turn finishes,

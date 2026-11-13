@@ -134,6 +134,9 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
         self._attention_since: dict[Key, float] = {}
         self._attention_phase = 0
         self._attention_timer: Timer | None = None
+        #: When each idle row last finished a turn, until the human reads it.
+        self._finished_at: dict[Key, float] = {}
+        self._unread_timer: Timer | None = None
         self._await_marks = AwaitMarks()
         self._mark_kinds: dict[str, MarkKind] | None = None
         #: A folded-away participant's key, and the visible row that stands for it.
@@ -495,6 +498,7 @@ class ParticipantTree(TreeMotion, TreeMenu, VerticalScroll):
         self._apply_branch_highlight()
         self.scroll_to_selection()
         self._sync_mark_seen()
+        self._sync_unread()
 
     def on_separator_row_hovered(self, message: SeparatorRow.Hovered) -> None:
         message.stop()
