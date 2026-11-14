@@ -419,7 +419,7 @@ async def terminate_terminal(
     snapshot: PaneSnapshot, *, before_effect: Callable[[], None] | None = None
 ) -> bool:
     current = await pane_snapshot(snapshot.pane_id)
-    if current is None or current != snapshot:
+    if current is None or not current.same_identity(snapshot):
         raise TmuxError("terminal identity changed before termination")
     if current.dead:
         return True

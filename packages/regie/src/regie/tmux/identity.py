@@ -77,6 +77,23 @@ class ServerIdentity:
         return cls(*parts)
 
 
+# Presentation fields (executable, cwd, session_name, window_name) change while a pane lives.
+_IDENTITY_FIELDS = (
+    "server_identity",
+    "pane_id",
+    "pane_pid",
+    "dead",
+    "session_id",
+    "provider_id",
+    "terminal_incarnation",
+    "occupant_id",
+    "occupant_digest",
+    "occupant_pane_pid",
+    "launch_id",
+    "launch_executable",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class PaneSnapshot:
     server_identity: str
@@ -110,6 +127,9 @@ class PaneSnapshot:
                 self.launch_executable,
             )
         )
+
+    def same_identity(self, other: PaneSnapshot) -> bool:
+        return all(getattr(self, name) == getattr(other, name) for name in _IDENTITY_FIELDS)
 
 
 def occupant_digest(occupant_id: str) -> str:
