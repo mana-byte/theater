@@ -1266,8 +1266,9 @@ Approval enforcement requires proof that the exact generated plugin is active on
 selected server before user input or a capable UI starts. OpenCode can continue after
 a plugin-load failure, so a successful launch alone is insufficient. The
 [approval plugin](../theater/harness/builtin/plugins/opencode/approval.py) preserves
-native denies and tightens allows, including saved approvals, into asks for `manual`
-and `edits`.
+native denies and tightens allows into asks for `manual` and `edits`, except what a
+human answered "always" to since the server started (learned from `permission.*` events;
+a missed event only means one more ask).
 
 Both native and guarded legacy launches use a private server and the lineage database.
 Native sends carry a client-minted message ID; interrupt retains its terminal route.
