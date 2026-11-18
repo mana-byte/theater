@@ -29,6 +29,8 @@ class OpenCodeLiveSource(Source):
         self._session_id: str | None = None
         self._state = RuntimeExecutionState.UNKNOWN
         self._health = ConnectionHealth.UNOPENED
+        #: A permission ask blocks the running turn; shown, never used to admit work.
+        self._asking = False
         self._admitted_at: float | None = None
         #: The server's own stamp on that prompt, to compare with the server's idle stamp.
         self._admitted_created: int | None = None
@@ -64,7 +66,9 @@ class OpenCodeLiveSource(Source):
         self._admitted_created = created
         self._set(RuntimeExecutionState.ACTIVE, self._health)
 
-    def observe(self, active: Mapping[str, object] | None, idle_at: int | None = None) -> None:
+    def observe(
+        self, active: Mapping[str, object] | None, idle_at: int | None = None, asking: bool = False
+    ) -> None:
         """One `session.active` read, taken after the session's idle stamp when that was read.
 
         None is a failed read.
@@ -81,7 +85,7 @@ class OpenCodeLiveSource(Source):
         self._failures = 0
         if self._session_id in active:
             self._admitted_at = None
-            self._set(RuntimeExecutionState.ACTIVE, ConnectionHealth.CONNECTED)
+            self._set(RuntimeExecutionState.ACTIVE, ConnectionHealth.CONNECTED, asking)
             return
         if self._admission_pending(idle_at):
             self._set(RuntimeExecutionState.ACTIVE, ConnectionHealth.CONNECTED)
@@ -126,14 +130,16 @@ class OpenCodeLiveSource(Source):
             ),
         )
 
-    def _set(self, state: RuntimeExecutionState, health: ConnectionHealth) -> None:
-        if (state, health) != (self._state, self._health):
-            self._state, self._health = state, health
+    def _set(
+        self, state: RuntimeExecutionState, health: ConnectionHealth, asking: bool = False
+    ) -> None:
+        if (state, health, asking) != (self._state, self._health, self._asking):
+            self._state, self._health, self._asking = state, health, asking
             self._revision += 1
 
     def _hint_status(self) -> Status | None:
         if self._state is RuntimeExecutionState.ACTIVE:
-            return Status.WORKING
+            return Status.AWAITING_INPUT if self._asking else Status.WORKING
         if self._state is RuntimeExecutionState.IDLE:
             return Status.IDLE
         return None
