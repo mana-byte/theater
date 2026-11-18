@@ -443,9 +443,12 @@ def parse_measurement(lines: list[str]) -> Measurement | None:
                     after = AFTER_OBSERVATION.search(match.group(3))
                     if after is not None:
                         rendered_after_observation = float(after.group(1))
-        elif index > rendered_line >= 0 and "presentation.open.execute" in event.message:
-            if focused is None:
-                focused = event.timestamp
+        elif (
+            index > rendered_line >= 0
+            and "presentation.open.execute" in event.message
+            and focused is None
+        ):
+            focused = event.timestamp
     required = {"observed", "rendered"}
     if not required.issubset(phases) or focused is None or rendered_after_observation is None:
         return None

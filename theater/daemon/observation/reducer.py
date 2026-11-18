@@ -547,11 +547,10 @@ class Reducer:
             if oldest is None:
                 clock.rescue_since = now
                 clock.rescue_armed_at = None
-            elif self._wall_now_fn() - oldest.created_at > self.rescue:
-                if not await rescue_jobs_fn(
-                    pid, observer, clock, turns=turns, turn_state=turn_state
-                ):
-                    clock.rescue_since = now
+            elif self._wall_now_fn() - oldest.created_at > self.rescue and not await rescue_jobs_fn(
+                pid, observer, clock, turns=turns, turn_state=turn_state
+            ):
+                clock.rescue_since = now
 
     async def screen_only(
         self,
