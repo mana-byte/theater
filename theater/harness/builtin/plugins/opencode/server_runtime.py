@@ -301,9 +301,19 @@ class OpenCodeServerRuntime(HarnessRuntime):
                 active, idle_at = await self._read_server(self._session_id)
             except Exception:
                 active, idle_at = None, None
+            asking = await self._asks_pending(self._session_id, active)
             if not self._closed:
-                self._source.observe(active, idle_at)
+                self._source.observe(active, idle_at, asking)
                 self._last_observed_read = self._reads_begun
+
+    async def _asks_pending(self, session_id: str, active: Mapping[str, object] | None) -> bool:
+        """Display hint only, so a failed read asserts nothing."""
+        if active is None or session_id not in active:
+            return False
+        try:
+            return await self._client.pending_permissions(session_id) > 0
+        except Exception:
+            return False
 
     async def _read_server(self, session_id: str) -> tuple[Mapping[str, object], int | None]:
         """`session.active`, plus the session's idle stamp when a prompt may have ended unseen."""

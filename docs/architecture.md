@@ -748,11 +748,9 @@ Reading those facts performs no native I/O and does not extend the overall deadl
 ### Three independent quiet timers
 
 `AWAITING_INPUT` is a display hint for a blocked question or approval, not an
-ordinary idle prompt or a control permission. OpenCode's server adapter tracks
-scoped pending request IDs from native events and reconciles them through
-read-only endpoints on connection. Its TUI adapter reads pending-request counts
-from scoped snapshots. Both include direct native children with explicit parent
-identity, matching OpenCode's parent-pane dialogs; neither changes native
+ordinary idle prompt or a control permission. OpenCode's server adapter lists the
+session's pending permission asks on each poll while a turn runs; question forms
+and child sessions' asks are not read, and it never changes native
 execution-state admission.
 
 Screen fallback explicitly requests up to 64 KiB from the target's terminal

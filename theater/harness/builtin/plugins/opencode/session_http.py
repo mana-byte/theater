@@ -72,6 +72,16 @@ class OpenCodeSessionClient:
         """Sessions this server is running now; absence proves idle (session.active)."""
         return await self._data("GET", "/api/session/active")
 
+    async def pending_permissions(self, session_id: str) -> int:
+        """Permission asks the session is blocked on (session.permission.list)."""
+        sid = _safe_session_id(session_id)
+        path = f"/api/session/{sid}/permission"
+        result = await self._transport._json_request("GET", path, session_id=sid)
+        data = result.get("data") if isinstance(result, Mapping) else None
+        if not isinstance(data, list):
+            raise OpenCodeHttpError("GET", path, "response carries no permission list")
+        return len(data)
+
     async def _data(
         self,
         method: str,

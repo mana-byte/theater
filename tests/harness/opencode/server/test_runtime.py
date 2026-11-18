@@ -33,6 +33,7 @@ from theater.harness.contracts.runtime import (
     RuntimeIO,
     SessionOpenMode,
 )
+from theater.models import Status
 
 
 class RuntimeFake(ServerFake):
@@ -47,6 +48,9 @@ class RuntimeFake(ServerFake):
         #: The server clock's stamp on an admitted prompt, and on the session's last idle.
         self.prompt_created: int | None = 1_000
         self.idle_at: int | None = None
+        #: Pending permission asks the session lists; 404 when the list is unreadable.
+        self.asks = 0
+        self.permission_fails = False
 
     def bodies(self, suffix: str) -> list[dict[str, Any]]:
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith(suffix)]
@@ -76,6 +80,9 @@ class RuntimeFake(ServerFake):
             if self.prompt_created is not None:
                 admitted["time"] = {"created": self.prompt_created}
             return {"data": admitted}
+        if rest == ["permission"] and method == "GET":
+            asks = [{"id": f"per_{n}"} for n in range(self.asks)]
+            return None if self.permission_fails else {"data": asks}
         if rest:
             return None
         times = {"created": 1, "updated": 1}
@@ -287,6 +294,28 @@ async def test_a_snapshot_reads_the_server_rather_than_a_poll_that_may_predate_t
     assert (await runtime.send(operation_id="op-2", prompt="again")).result is (
         DeliveryResult.ACCEPTED
     )
+    await runtime.aclose()
+
+
+async def test_a_running_turn_blocked_on_a_permission_ask_reads_awaiting_input(
+    server: RuntimeFake, runtime, unpolled
+) -> None:
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    await runtime.send(operation_id="op-1", prompt="hello")
+    source = runtime.live_source()
+
+    async def status() -> Status | None:
+        await runtime.snapshot()
+        return (await source.read()).status
+
+    assert await status() is Status.WORKING
+    server.asks = 1
+    assert await status() is Status.AWAITING_INPUT
+    server.permission_fails = True  # an unreadable list asserts nothing
+    assert await status() is Status.WORKING
+    server.permission_fails = False
+    server.asks = 0  # answered
+    assert await status() is Status.WORKING
     await runtime.aclose()
 
 
