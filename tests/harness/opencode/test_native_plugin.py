@@ -181,31 +181,82 @@ process.exit(0)
 """
 
 
-@pytest.mark.requires_node
-@pytest.mark.parametrize(
-    ("approval", "edit", "shell"),
-    [("manual", "ask", "ask"), ("edits", "allow", "ask"), ("yolo", "allow", "allow")],
-)
-def test_the_plugin_only_tightens_native_decisions(tmp_path, approval, edit, shell):
+def _run_probe(tmp_path: Path, approval: str, probe: str) -> dict[str, Any]:
     files = render_native_plugin("abc123", tmp_path / "x.json", tmp_path / "token", approval)
     for path, body in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
     server = plugin_dir(tmp_path / "x.json") / "server.js"
     run = subprocess.run(
-        ["node", "--input-type=module", "-e", _PLUGIN_PROBE, server.as_uri()],
+        ["node", "--input-type=module", "-e", probe, server.as_uri()],
         capture_output=True,
         text=True,
         timeout=30,
         check=True,
     )
-    decided = json.loads(run.stdout)
+    return json.loads(run.stdout)
+
+
+@pytest.mark.requires_node
+@pytest.mark.parametrize(
+    ("approval", "edit", "shell"),
+    [("manual", "ask", "ask"), ("edits", "allow", "ask"), ("yolo", "allow", "allow")],
+)
+def test_the_plugin_only_tightens_native_decisions(tmp_path, approval, edit, shell):
+    decided = _run_probe(tmp_path, approval, _PLUGIN_PROBE)
     assert decided["id"] == "theater.opencode-session"
     assert (decided["edit"], decided["shell"]) == (edit, shell)
     assert decided["read"] == "allow" and decided["model"] == "allow"
     assert decided["nativeAsk"] == "ask"
     if approval != "yolo":
         assert (decided["env"], decided["example"]) == ("ask", "allow")
+
+
+_ALWAYS_PROBE = """
+const plugin = (await import(process.argv[1])).default
+const hooks = {}
+const registered = (name) => async (hook, callback) => {
+  hooks[`${name}.${hook}`] = callback
+  return { dispose: async () => {} }
+}
+const ask = (id, action, save) => ({
+  type: "permission.asked", data: { id, action, resources: save, save },
+})
+const reply = (id, answer) => ({
+  type: "permission.replied", data: { requestID: id, reply: answer },
+})
+const events = [
+  ask("per_1", "shell", ["git *"]), reply("per_1", "always"),
+  ask("per_2", "edit", ["/w/a.txt"]), reply("per_2", "once"),
+]
+const stream = { async *[Symbol.asyncIterator]() { yield* events; await new Promise(() => {}) } }
+await plugin.setup({
+  location: { directory: "/w" },
+  permission: { hook: registered("permission") },
+  session: { hook: registered("session"), get: async () => ({ id: "ses_1" }) },
+  tool: { hook: registered("tool") },
+  mcp: { list: async () => ({ data: [] }) },
+  event: { subscribe: () => stream },
+})
+await new Promise((resolve) => setTimeout(resolve, 50))
+const decide = (action, resources) => {
+  const event = { action, resources, effect: "allow" }
+  hooks["permission.evaluate"](event)
+  return event.effect
+}
+console.log(JSON.stringify({
+  covered: decide("shell", ["git log"]),
+  other: decide("shell", ["rm -rf x"]),
+  once: decide("edit", ["/w/a.txt"]),
+}))
+process.exit(0)
+"""
+
+
+@pytest.mark.requires_node
+def test_an_always_reply_stops_the_plugin_re_asking_for_what_it_covers(tmp_path):
+    decided = _run_probe(tmp_path, "manual", _ALWAYS_PROBE)
+    assert decided == {"covered": "allow", "other": "ask", "once": "ask"}
 
 
 _PROBE = """

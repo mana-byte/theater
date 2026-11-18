@@ -29,6 +29,35 @@ function approvalEffect(action, resources) {
   return effects.includes("ask") ? "ask" : "allow"
 }
 
+// A human's "always" reply, learned from events: a missed event only means one more ask.
+const asked = new Map()
+const granted = []
+
+function alwaysAllowed(action, resources) {
+  return (
+    resources.length > 0 &&
+    granted.some(
+      (grant) =>
+        wildcard(grant.action, action) &&
+        resources.every((resource) => grant.save.some((pattern) => wildcard(pattern, resource))),
+    )
+  )
+}
+
+function learn(type, data) {
+  if (type === "permission.asked") {
+    if (asked.size >= 256) asked.clear()
+    asked.set(data.id, { action: data.action, save: data.save ?? [] })
+  } else if (type === "permission.replied") {
+    const ask = asked.get(data.requestID)
+    asked.delete(data.requestID)
+    if (data.reply === "always" && ask?.save.length) {
+      if (granted.length >= 256) granted.shift()
+      granted.push(ask)
+    }
+  }
+}
+
 function publish(sessionID) {
   return new Promise((resolve) => {
     let settled = false
@@ -178,14 +207,15 @@ export default {
   id: settings.pluginID,
   async setup(ctx) {
     // Unguarded: if approval cannot be enforced the plugin fails, and no receipt ever vouches
-    // for the session. The hook only tightens native allows (saved ones included) to asks.
+    // for the session. The hook only tightens native allows to asks, except what a human
+    // already answered "always" to, which OpenCode saved.
     if (settings.rules.length) {
       await ctx.permission.hook("evaluate", (event) => {
         if (exempt.has(event.action) || event.effect !== "allow") return
         try {
-          if (approvalEffect(event.action, Array.from(event.resources ?? [])) === "ask") {
-            event.effect = "ask"
-          }
+          const resources = Array.from(event.resources ?? [])
+          const ask = approvalEffect(event.action, resources) === "ask"
+          if (ask && !alwaysAllowed(event.action, resources)) event.effect = "ask"
         } catch {
           event.effect = "ask"
         }
@@ -219,6 +249,7 @@ export default {
             if (event.type === "session.created" && !data.parentID) report(data.sessionID)
             else if (event.type === "session.forked") report(data.sessionID)
             else if (event.type === "mcp.status.changed") void refreshServers(ctx)
+            else learn(event.type, data)
           }
         } catch {}
         if (!abort.signal.aborted) await sleep(1000)
