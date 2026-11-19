@@ -148,6 +148,13 @@ async def test_a_live_wired_participant_settles_only_dialog_screens(registry, mo
     await observer._screen_status_due(p.id, screen, clock)
     assert registry.get(p.id).status is Status.WORKING
 
+    # A LOW-confidence approval (scrollback prose, not a current modal) must not
+    # override a native channel either.
+    screen._reading = ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.LOW)
+    clock.screen_quiet_since = time.monotonic() - 1
+    await observer._screen_status_due(p.id, screen, clock)
+    assert registry.get(p.id).status is Status.WORKING
+
 
 @pytest.mark.asyncio
 async def test_a_dead_live_wired_participant_is_not_captured(registry, monkeypatch):

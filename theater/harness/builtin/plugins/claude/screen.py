@@ -69,13 +69,18 @@ class ClaudeScreen:
         """
         if TRUST_MARKER in capture:
             return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
-        # The cancel footer can wrap in a narrow pane ("Esc\nto cancel" at 40 columns),
-        # so match whitespace-normalized text. The supported binary renders it
-        # capitalized ("Esc to cancel") on both permission and question dialogs;
-        # matching case-insensitively would read quoted lowercase prose as a dialog.
-        if APPROVAL_MARKER in " ".join(capture.split()):
-            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         tail = screen_tail(capture, _SCREEN_TAIL_LINES)
+        # The cancel footer can wrap in a narrow pane ("Esc\nto cancel" at 40 columns),
+        # so match whitespace-normalized text, case-sensitively: the supported binary
+        # renders it capitalized ("Esc to cancel") on permission and question dialogs.
+        # HIGH confidence requires a current modal: the marker in the on-screen tail and
+        # no working footer on the bottom line. Scrollback prose alone stays a LOW hint.
+        if APPROVAL_MARKER in " ".join(
+            " ".join(tail).split()
+        ) and WORKING_MARKER not in last_screen_line(capture):
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
+        if APPROVAL_MARKER in " ".join(capture.split()):
+            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.LOW)
         if any(WORKING_MARKER in line for line in tail):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if last_screen_line(capture) in IDLE_PROMPTS:

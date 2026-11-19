@@ -21,7 +21,14 @@ from theater.daemon import lineage
 from theater.daemon.observation.screen import end_turn_from_screen_text
 from theater.daemon.observation.turns import Turn, TurnAccumulator
 from theater.daemon.persistence.transactions import active_write_unit
-from theater.harness import Event, EventKind, HarnessObserver, ScreenKind, status_after
+from theater.harness import (
+    Event,
+    EventKind,
+    HarnessObserver,
+    ScreenConfidence,
+    ScreenKind,
+    status_after,
+)
 from theater.harness.contracts.source import NativeTurnState
 from theater.harness.source import Batch, Source
 from theater.models import Status
@@ -588,16 +595,18 @@ class Reducer:
             if source_status is Status.AWAITING_INPUT:
                 return
             if self._live_fn(pid):
-                # A native channel owns status: a pane can read idle mid-turn, so only an
-                # unambiguous human dialog (approval/trust) may settle it, never idle/working.
+                # A native channel owns status: a pane can read idle mid-turn, so only a
+                # high-confidence current dialog (approval/trust footer on screen) may
+                # settle it — never idle/working, and scrollback prose is not a dialog.
                 p = self.store.get_participant(pid)
                 capture = (
                     None if p is None or p.status is Status.DEAD else await self._capture_fn(pid)
                 )
                 reading = None if capture is None else observer.screen_reading(capture)
-                if reading is not None and reading.kind in (
-                    ScreenKind.APPROVAL,
-                    ScreenKind.TRUST,
+                if (
+                    reading is not None
+                    and reading.kind in (ScreenKind.APPROVAL, ScreenKind.TRUST)
+                    and reading.confidence is ScreenConfidence.HIGH
                 ):
                     self.apply_screen_reading(pid, reading)
             else:

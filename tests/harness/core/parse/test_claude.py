@@ -195,11 +195,12 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
 
 
 @pytest.mark.parametrize(
-    ("capture", "expected"),
+    ("capture", "expected", "confidence"),
     [
         pytest.param(
             "Do you want to proceed?\n  Yes\n  No\nEsc to cancel",
             ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
             id="permission-footer",
         ),
         # Captured from a real Claude 2.1.327 AskUserQuestion dialog in a 100-column
@@ -211,6 +212,7 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
             "────────────────\n4.Chat about this\n"
             "Enter to select · ↑/↓ to navigate · Esc to cancel",
             ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
             id="captured-question-dialog",
         ),
         # At 40 columns the same footer wraps ("Esc\nto cancel"); the match must
@@ -218,20 +220,32 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
         pytest.param(
             "Enter to select · ↑/↓ to navigate · Esc\nto cancel",
             ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
             id="wrapped-footer-40col",
         ),
         # Lowercase cancel prose in the scrollback is not the dialog footer.
         pytest.param(
             "The editor hint says esc to cancel.\nReading files...\nesc to interrupt",
             ScreenKind.WORKING,
+            ScreenConfidence.HIGH,
             id="lowercase-cancel-prose-while-working",
+        ),
+        # Capitalized prose above a live working footer is scrollback, not a current
+        # modal: the kind stays APPROVAL for the legacy display path, but confidence
+        # drops to LOW so the native-status override can ignore it.
+        pytest.param(
+            "The editor hint says Esc to cancel.\n"
+            "⏸ manual mode on · esc to interrupt · ← for agents",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.LOW,
+            id="capitalized-cancel-prose-above-working-footer",
         ),
     ],
 )
-def test_claude_cancel_footer_matching(capture, expected):
+def test_claude_cancel_footer_matching(capture, expected, confidence):
     reading = ClaudeCodeObserver().screen_reading(capture)
     assert reading.kind is expected
-    assert reading.confidence is ScreenConfidence.HIGH
+    assert reading.confidence is confidence
 
 
 def test_claude_idle_footer_classifies_as_prompt():
