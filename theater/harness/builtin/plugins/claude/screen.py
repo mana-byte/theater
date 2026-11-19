@@ -69,13 +69,15 @@ class ClaudeScreen:
         """
         if TRUST_MARKER in capture:
             return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
+        tail = screen_tail(capture, _SCREEN_TAIL_LINES)
+        # A live turn's chrome owns the tail: quoted "cancel" prose in the scrollback
+        # must not read as a dialog while "esc to interrupt" is showing.
+        if any(WORKING_MARKER in line for line in tail):
+            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         # Both cases render in the supported binary ("Esc to cancel" on permission
         # dialogs, "esc to cancel" on the question dialog), so match case-insensitively.
         if APPROVAL_MARKER.lower() in capture.lower():
             return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
-        tail = screen_tail(capture, _SCREEN_TAIL_LINES)
-        if any(WORKING_MARKER in line for line in tail):
-            return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if last_screen_line(capture) in IDLE_PROMPTS:
             return ScreenReading(kind=ScreenKind.PROMPT, confidence=ScreenConfidence.HIGH)
         if any(IDLE_FOOTER in line for line in tail):

@@ -194,10 +194,33 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
-def test_claude_lowercase_cancel_footer_also_classifies_as_approval():
-    """The question dialog renders the footer lowercase; the match is case-insensitive."""
-    reading = ClaudeCodeObserver().screen_reading("esc to cancel")
-    assert reading.kind is ScreenKind.APPROVAL
+@pytest.mark.parametrize(
+    ("capture", "expected"),
+    [
+        # Both cases render in the supported binary: "Esc to cancel" on permission
+        # dialogs, "esc to cancel" on the question dialog. The footer is the pane's
+        # bottom line, so only that line may prove a live dialog.
+        pytest.param(
+            "Do you want to proceed?\n  Yes\n  No\nEsc to cancel",
+            ScreenKind.APPROVAL,
+            id="permission-footer",
+        ),
+        pytest.param(
+            "Pick one:\n  1. a\n  2. b\nesc to cancel",
+            ScreenKind.APPROVAL,
+            id="question-footer-lowercase",
+        ),
+        # Quoted prose in the scrollback must not outrank a live turn's chrome.
+        pytest.param(
+            "The editor hint says esc to cancel.\nReading files...\nesc to interrupt",
+            ScreenKind.WORKING,
+            id="cancel-prose-while-working",
+        ),
+    ],
+)
+def test_claude_cancel_footer_matching(capture, expected):
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is expected
     assert reading.confidence is ScreenConfidence.HIGH
 
 

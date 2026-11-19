@@ -590,7 +590,10 @@ class Reducer:
             if self._live_fn(pid):
                 # A native channel owns status: a pane can read idle mid-turn, so only an
                 # unambiguous human dialog (approval/trust) may settle it, never idle/working.
-                capture = await self._capture_fn(pid)
+                p = self.store.get_participant(pid)
+                capture = (
+                    None if p is None or p.status is Status.DEAD else await self._capture_fn(pid)
+                )
                 reading = None if capture is None else observer.screen_reading(capture)
                 if reading is not None and reading.kind in (
                     ScreenKind.APPROVAL,
