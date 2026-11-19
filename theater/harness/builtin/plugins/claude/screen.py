@@ -69,7 +69,9 @@ class ClaudeScreen:
         """
         if TRUST_MARKER in capture:
             return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
-        if APPROVAL_MARKER in capture:
+        # Both cases render in the supported binary ("Esc to cancel" on permission
+        # dialogs, "esc to cancel" on the question dialog), so match case-insensitively.
+        if APPROVAL_MARKER.lower() in capture.lower():
             return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         tail = screen_tail(capture, _SCREEN_TAIL_LINES)
         if any(WORKING_MARKER in line for line in tail):

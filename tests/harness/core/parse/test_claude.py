@@ -194,6 +194,13 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
+def test_claude_lowercase_cancel_footer_also_classifies_as_approval():
+    """The question dialog renders the footer lowercase; the match is case-insensitive."""
+    reading = ClaudeCodeObserver().screen_reading("esc to cancel")
+    assert reading.kind is ScreenKind.APPROVAL
+    assert reading.confidence is ScreenConfidence.HIGH
+
+
 def test_claude_idle_footer_classifies_as_prompt():
     """The shortcut hint is the idle evidence when no bare composer line shows."""
     reading = ClaudeCodeObserver().screen_reading(CLAUDE_IDLE)

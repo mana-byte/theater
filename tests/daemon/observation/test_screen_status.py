@@ -126,6 +126,29 @@ async def test_a_dead_participant_is_never_screen_checked(registry):
     assert registry.get(p.id).status is Status.DEAD
 
 
+@pytest.mark.asyncio
+async def test_a_live_wired_participant_settles_only_dialog_screens(registry, monkeypatch):
+    """A native channel owns status, but an approval/trust dialog on the pane still
+    settles AWAITING_INPUT; a bare prompt must not demote a live participant to idle."""
+    observer, screen, p = screen_checked(
+        registry,
+        reading=ScreenReading(ScreenKind.APPROVAL, ScreenConfidence.HIGH),
+        status=Status.WORKING,
+        awaiting=0.0,
+    )
+    monkeypatch.setattr(observer._reducer, "_live_fn", lambda pid: True)
+    clock = QuietClock()
+    clock.screen_quiet_since = time.monotonic() - 1
+    await observer._screen_status_due(p.id, screen, clock)
+    assert registry.get(p.id).status is Status.AWAITING_INPUT
+
+    screen._reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH)
+    registry.set_status(p.id, Status.WORKING)
+    clock.screen_quiet_since = time.monotonic() - 1
+    await observer._screen_status_due(p.id, screen, clock)
+    assert registry.get(p.id).status is Status.WORKING
+
+
 # A source still `waiting` for its input must keep the screen check alive: it is the
 # only status channel that needs no transcript (Claude writes none before its first message).
 @pytest.mark.asyncio

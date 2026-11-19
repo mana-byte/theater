@@ -581,16 +581,24 @@ class Reducer:
         source_status: Status | None = None,
     ) -> None:
         """Run the independently throttled status-only screen arm when due."""
-        if self._live_fn(pid):
-            # A native channel owns status: a pane can read idle mid-turn, so it never overrides it.
-            return
         now = self._monotonic_fn()
         if clock.screen_quiet_since is None:
             clock.screen_quiet_since = now
         if clock.screen_quiet_for(now) > clock.screen_interval(self.awaiting):
             if source_status is Status.AWAITING_INPUT:
                 return
-            reading = await self.check_idle_screen(pid, observer)
+            if self._live_fn(pid):
+                # A native channel owns status: a pane can read idle mid-turn, so only an
+                # unambiguous human dialog (approval/trust) may settle it, never idle/working.
+                capture = await self._capture_fn(pid)
+                reading = None if capture is None else observer.screen_reading(capture)
+                if reading is not None and reading.kind in (
+                    ScreenKind.APPROVAL,
+                    ScreenKind.TRUST,
+                ):
+                    self.apply_screen_reading(pid, reading)
+            else:
+                reading = await self.check_idle_screen(pid, observer)
             clock.note_screen(reading.kind if reading is not None else None)
             clock.screen_quiet_since = now
 
