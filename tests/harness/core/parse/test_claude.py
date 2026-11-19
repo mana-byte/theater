@@ -240,6 +240,14 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
             ScreenConfidence.LOW,
             id="capitalized-cancel-prose-above-working-footer",
         ),
+        # An unsent composer draft containing the phrase is not a modal either:
+        # captured from a real 2.1.327 PTY, the bottom line is the mode footer.
+        pytest.param(
+            "❯ The editor hint says Esc to cancel.\n⏸ manual mode on",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.LOW,
+            id="composer-draft-not-a-modal",
+        ),
     ],
 )
 def test_claude_cancel_footer_matching(capture, expected, confidence):
@@ -333,17 +341,20 @@ def test_claude_partial_or_unproved_task_footer_is_not_a_prompt(footer):
 
 
 @pytest.mark.parametrize(
-    ("marker", "kind"),
+    ("marker", "kind", "confidence"),
     [
-        (CLAUDE_TRUST, ScreenKind.TRUST),
-        (CLAUDE_APPROVAL, ScreenKind.APPROVAL),
-        ("✻ Working… esc to interrupt", ScreenKind.WORKING),
+        # Kind precedence is unchanged: a safety marker anywhere beats the task footer.
+        # But real 2.1.327 PTY captures show a marker above the mode footer is composer
+        # or scrollback text, not a modal, so only the working chrome stays HIGH.
+        (CLAUDE_TRUST, ScreenKind.TRUST, ScreenConfidence.LOW),
+        (CLAUDE_APPROVAL, ScreenKind.APPROVAL, ScreenConfidence.LOW),
+        ("✻ Working… esc to interrupt", ScreenKind.WORKING, ScreenConfidence.HIGH),
     ],
 )
-def test_claude_safety_markers_win_over_task_footer(marker, kind):
+def test_claude_safety_markers_win_over_task_footer(marker, kind, confidence):
     reading = ClaudeCodeObserver().screen_reading(f"{marker}\n{CLAUDE_IDLE_TASK_FOOTER}")
     assert reading.kind is kind
-    assert reading.confidence is ScreenConfidence.HIGH
+    assert reading.confidence is confidence
 
 
 def test_claude_impossible_symbol_indicator_pairing_is_not_a_prompt():
