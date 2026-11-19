@@ -197,24 +197,34 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
 @pytest.mark.parametrize(
     ("capture", "expected"),
     [
-        # Both cases render in the supported binary: "Esc to cancel" on permission
-        # dialogs, "esc to cancel" on the question dialog. The footer is the pane's
-        # bottom line, so only that line may prove a live dialog.
         pytest.param(
             "Do you want to proceed?\n  Yes\n  No\nEsc to cancel",
             ScreenKind.APPROVAL,
             id="permission-footer",
         ),
+        # Captured from a real Claude 2.1.327 AskUserQuestion dialog in a 100-column
+        # PTY: the footer is capitalized "Esc to cancel", and an option's own text
+        # ("1. esc to interrupt") must not turn the dialog into WORKING.
         pytest.param(
-            "Pick one:\n  1. a\n  2. b\nesc to cancel",
+            "☐ Shortcut\nWhich shortcut should stop the editor?\n❯1.esc to interrupt\n"
+            "First shortcut\n2.ctrl+c\nSecond shortcut\n3. Type something.\n"
+            "────────────────\n4.Chat about this\n"
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
             ScreenKind.APPROVAL,
-            id="question-footer-lowercase",
+            id="captured-question-dialog",
         ),
-        # Quoted prose in the scrollback must not outrank a live turn's chrome.
+        # At 40 columns the same footer wraps ("Esc\nto cancel"); the match must
+        # survive the line break.
+        pytest.param(
+            "Enter to select · ↑/↓ to navigate · Esc\nto cancel",
+            ScreenKind.APPROVAL,
+            id="wrapped-footer-40col",
+        ),
+        # Lowercase cancel prose in the scrollback is not the dialog footer.
         pytest.param(
             "The editor hint says esc to cancel.\nReading files...\nesc to interrupt",
             ScreenKind.WORKING,
-            id="cancel-prose-while-working",
+            id="lowercase-cancel-prose-while-working",
         ),
     ],
 )
