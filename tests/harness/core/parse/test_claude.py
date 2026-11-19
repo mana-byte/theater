@@ -248,6 +248,15 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
             ScreenConfidence.LOW,
             id="composer-draft-not-a-modal",
         ),
+        # A question body quoting trust wording must not mask the real cancel footer:
+        # HIGH current-modal evidence is evaluated for every marker before LOW hints.
+        pytest.param(
+            "What does Yes, I trust this folder mean?\n❯1. yes\n2. no\n"
+            "4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
+            id="trust-wording-in-question-body",
+        ),
     ],
 )
 def test_claude_cancel_footer_matching(capture, expected, confidence):

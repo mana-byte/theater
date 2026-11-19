@@ -80,9 +80,14 @@ class ClaudeScreen:
             bool(footer2) and WORKING_MARKER not in bottom and not _is_mode_line_footer(bottom)
         )
         markers = ((TRUST_MARKER, ScreenKind.TRUST), (APPROVAL_MARKER, ScreenKind.APPROVAL))
+        # HIGH current-modal evidence for any marker wins before any LOW scrollback
+        # hint: a question body may quote trust wording while its real footer is the
+        # cancel line.
+        if current_dialog:
+            for marker, kind in markers:
+                if marker in footer2:
+                    return ScreenReading(kind=kind, confidence=ScreenConfidence.HIGH)
         for marker, kind in markers:
-            if current_dialog and marker in footer2:
-                return ScreenReading(kind=kind, confidence=ScreenConfidence.HIGH)
             if marker in " ".join(capture.split()):
                 return ScreenReading(kind=kind, confidence=ScreenConfidence.LOW)
         if any(WORKING_MARKER in line for line in tail):
