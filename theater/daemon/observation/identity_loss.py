@@ -77,10 +77,10 @@ class IdentityLossWiring:
     def _clear_source_error_on_progress(self, pid: str, batch: Batch) -> None:
         self._failures.clear_source_error_on_progress(pid, batch)
 
-    def _evidence_is_bound_to_another_live_participant(
+    def _evidence_is_bound_to_another_participant(
         self, pid: str, evidence: IdentityLossEvidence
     ) -> bool:
-        return self._failures.evidence_is_bound_to_another_live(
+        return self._failures.evidence_is_bound_to_another_participant(
             pid,
             evidence,
             bound_transcripts=self._attachments._bound_transcripts,

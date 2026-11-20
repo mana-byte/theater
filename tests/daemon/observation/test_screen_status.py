@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 
-from tests.support.observation import apply_batch
+from tests.support.observation import LIVE_CHANNEL, apply_batch
 from tests.support.observer_rigs import WaitingHarness, screen_checked
 from tests.support.shipped import VibeHarness
 from tests.support.waiting import until
@@ -22,6 +22,8 @@ from theater.constants.observation import (
     SCREEN_CHECK_BACKOFF_CAP_SECONDS,
     WORKING_SCREEN_INTERVAL_CAP_SECONDS,
 )
+from theater.daemon.jobs import JobManager
+from theater.daemon.observation.live import LiveRegistration
 from theater.daemon.observer import (
     AWAITING_INPUT_TIMEOUT,
     Observer,
@@ -30,6 +32,7 @@ from theater.daemon.observer import (
 )
 from theater.daemon.schema import participants as participants_table
 from theater.harness.base import Event, EventKind
+from theater.harness.contracts.runtime import LiveChannelDeclaration
 from theater.harness.observation import (
     ScreenConfidence,
     ScreenKind,
@@ -207,19 +210,34 @@ async def test_a_source_that_never_attaches_still_gets_a_screen_check(registry):
 
 
 @pytest.mark.asyncio
-async def test_quarantined_full_watch_moves_screen_without_reading_source(registry):
-    """Restart replay quarantines before the source can attach or read."""
+@pytest.mark.parametrize("native", [False, True])
+async def test_quarantined_full_watch_moves_screen_without_reading_source(registry, native):
+    """Quarantine permits display-only screen status, never transcript reads or job completion."""
     harness = WaitingHarness(ScreenReading(ScreenKind.WORKING, ScreenConfidence.HIGH))
     participant = registry.register(harness="waiting", pane=None, cwd="/tmp")
     first = Observer(registry, harnesses={})
     first.mark_transcript_identity_lost(participant.id, "positive rotation evidence")
+    jobs = JobManager(registry.store)
+    jobs.create(handle="quarantined-job", caller_id="caller", target_id=participant.id, kind="send")
     observer = Observer(
         registry,
         {"waiting": harness},
         poll=0.01,
         search=0.01,
         awaiting=0.0,
+        jobs=jobs,
+        failure_grace=999.0,
     )
+    if native:
+        observer.live.register(
+            LiveRegistration(
+                participant_id=participant.id,
+                live_source=harness.source,
+                channel=LiveChannelDeclaration(channel=LIVE_CHANNEL),
+                backend_generation=1,
+                native_session_id="session-a",
+            )
+        )
 
     async def capture_pane(_pane):
         return "rendered pane"
@@ -233,6 +251,8 @@ async def test_quarantined_full_watch_moves_screen_without_reading_source(regist
         harness.observer._reading = ScreenReading(ScreenKind.PROMPT, ScreenConfidence.HIGH)
         assert await until(lambda: registry.get(participant.id).status is Status.IDLE)
         assert harness.source.reads == 0
+        assert observer.transcript_identity_lost(participant.id)
+        assert jobs.get("quarantined-job").state == "running"
         assert participant.id not in observer._bound_transcripts.values()
     finally:
         await observer.aclose()

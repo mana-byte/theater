@@ -9,7 +9,7 @@ from pathlib import Path
 
 from theater.daemon.registry import Registry
 from theater.harness import normalize as normalize_harness
-from theater.harness.source import History
+from theater.harness.source import Attachment, History, IdentityLossEvidence
 from theater.models import Status
 from theater.provenance import is_trusted_provenance
 from theater.transcript_identity import canonical_location, same_location
@@ -168,7 +168,9 @@ def has_cwd_competitor(
     return False
 
 
-def trusted_dead_owner_blocks(pid: str, attached, store, registry: Registry) -> bool:
+def trusted_dead_owner_blocks(
+    pid: str, attached: Attachment | IdentityLossEvidence, store, registry: Registry
+) -> bool:
     """Dead trusted owners keep their transcript unless this is their successor."""
     import logging
 
@@ -176,6 +178,7 @@ def trusted_dead_owner_blocks(pid: str, attached, store, registry: Registry) -> 
     from theater.transcript_identity import same_location
 
     _logger = logging.getLogger("theater.observer")
+    correlation = attached.correlation if isinstance(attached, Attachment) else None
     for other in registry.list(include_dead=True):
         if (
             other.id == pid
@@ -189,15 +192,16 @@ def trusted_dead_owner_blocks(pid: str, attached, store, registry: Registry) -> 
             and other.session_id is not None
             and attached.session_id == other.session_id
         )
-        if same_session and is_trusted_provenance(attached.correlation):
+        if same_session and is_trusted_provenance(correlation):
             return False
-        _logger.warning(
-            "transcript %s belongs to dead participant %s (%s); refusing %s (%s)",
-            attached.location,
-            other.id,
-            other.session_correlation,
-            pid,
-            attached.correlation,
-        )
+        if isinstance(attached, Attachment):
+            _logger.warning(
+                "transcript %s belongs to dead participant %s (%s); refusing %s (%s)",
+                attached.location,
+                other.id,
+                other.session_correlation,
+                pid,
+                correlation,
+            )
         return True
     return False

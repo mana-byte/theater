@@ -12,6 +12,7 @@ from theater.constants.observation import (
     IDENTITY_LOSS_CONFIRMATIONS,
     SKIPPED_RECORD_ERROR_CODES,
 )
+from theater.daemon.observation.identity import trusted_dead_owner_blocks
 from theater.models import JobState, Status
 from theater.transcript_identity import (
     TRANSCRIPT_IDENTITY_LOST_CODE,
@@ -199,15 +200,15 @@ class FailureTracker:
             finish_fn=finish_fn,
         )
 
-    def evidence_is_bound_to_another_live(
+    def evidence_is_bound_to_another_participant(
         self, pid: str, evidence, *, bound_transcripts, binding_sessions
     ) -> bool:
-        """Whether loss evidence names a transcript another live participant owns."""
+        """A retained foreign owner is not evidence that this participant switched sessions."""
         if self._location_bound_to_another_live(pid, evidence.location, bound_transcripts):
             return True
         return self._session_id_bound_to_another_live(
             pid, evidence.session_id, bound_transcripts, binding_sessions
-        )
+        ) or trusted_dead_owner_blocks(pid, evidence, self.store, self.registry)
 
     def _location_bound_to_another_live(self, pid: str, location: str, bound_transcripts) -> bool:
         owner = bound_transcripts.get(canonical_location(location))
