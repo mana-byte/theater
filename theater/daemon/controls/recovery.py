@@ -12,6 +12,7 @@ from theater.daemon.controls._common import (
     DAEMON_RESTARTED_ERROR_CODE,
     DELIVERY_UNKNOWN_ERROR_CODE,
     SEND_REJECTED_ERROR_CODE,
+    _deferred_unbound,
 )
 from theater.daemon.controls._host import ControlHost
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -133,6 +134,10 @@ class RecoveryControls(ControlHost):
         """Fail queued followups unless their exact route remains recoverable."""
         failed: list[Job] = []
         for operation in self._store.queued_control_operations(participant_id):
+            if _deferred_unbound(operation):
+                # A durable pending intent admitted during native disconnection: it stays
+                # queued and late-binds to the first verified route after the restart.
+                continue
             if operation.transport is ControlTransport.PROVIDER_TERMINAL or (
                 preserve_legacy_queued and operation.transport is ControlTransport.TERMINAL_FALLBACK
             ):

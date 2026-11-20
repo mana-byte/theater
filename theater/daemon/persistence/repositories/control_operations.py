@@ -17,6 +17,7 @@ from theater.constants.harness import HARNESS_RUNTIME_ERROR_MAX_CHARS
 from theater.daemon.persistence.database import Database
 from theater.daemon.persistence.repositories._runtime_validation import (
     bounded_id,
+    generation,
     optional_bounded_id,
     optional_bounded_text,
     optional_generation,
@@ -317,6 +318,46 @@ class ControlOperationRepository:
             )
         )
         return bool(result.rowcount)
+
+    def bind_queued_provider_identity(
+        self,
+        operation_id: str,
+        *,
+        provider_id: str,
+        provider_generation: int,
+        terminal_id: str,
+        terminal_incarnation: str,
+        updated_at: float,
+        connection: Connection | None = None,
+    ) -> ControlOperation | None:
+        """Late-bind a never-dispatched queued row to the current provider terminal identity.
+
+        Only a still-QUEUED row is rebound; payload and native identity fields are untouched.
+        """
+        bounded_id(provider_id, "operation provider_id")
+        generation(provider_generation, "operation provider_generation")
+        bounded_id(terminal_id, "operation terminal_id")
+        bounded_id(terminal_incarnation, "operation terminal_incarnation")
+        timestamp(updated_at, "queued operation updated_at")
+        conn = self._db.conn if connection is None else connection
+        result = conn.execute(
+            control_operations.update()
+            .where(control_operations.c.operation_id == operation_id)
+            .where(control_operations.c.delivery_phase == str(ControlDeliveryPhase.QUEUED))
+            .values(
+                provider_id=provider_id,
+                provider_generation=provider_generation,
+                terminal_id=terminal_id,
+                terminal_incarnation=terminal_incarnation,
+                updated_at=updated_at,
+            )
+        )
+        if not result.rowcount:
+            return None
+        row = conn.execute(
+            select(control_operations).where(control_operations.c.operation_id == operation_id)
+        ).fetchone()
+        return None if row is None else self._from_row(dict(row._mapping))
 
     def dispatched_for_participant(self, participant_id: str) -> list[ControlOperation]:
         """Operations whose transmission began and whose ack may never arrive."""

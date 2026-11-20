@@ -127,6 +127,42 @@ class ControlOperationStore(StoreHost):
                 self._append_control_event(unit, current)
             return changed
 
+    def bind_queued_provider_identity(
+        self,
+        operation_id: str,
+        *,
+        provider_id: str,
+        provider_generation: int,
+        terminal_id: str,
+        terminal_incarnation: str,
+        updated_at: float,
+        connection=None,
+    ):
+        """Late-bind a still-queued operation to the current provider terminal identity."""
+        if connection is not None:
+            return self._control_operations.bind_queued_provider_identity(
+                operation_id,
+                provider_id=provider_id,
+                provider_generation=provider_generation,
+                terminal_id=terminal_id,
+                terminal_incarnation=terminal_incarnation,
+                updated_at=updated_at,
+                connection=connection,
+            )
+        with self.write_unit() as unit:
+            bound = self._control_operations.bind_queued_provider_identity(
+                operation_id,
+                provider_id=provider_id,
+                provider_generation=provider_generation,
+                terminal_id=terminal_id,
+                terminal_incarnation=terminal_incarnation,
+                updated_at=updated_at,
+                connection=unit.connection,
+            )
+            if bound is not None:
+                self._append_control_event(unit, bound)
+            return bound
+
     def dispatched_control_operations(self, participant_id: str) -> list:
         """Operations whose transmission began and whose ack may never arrive."""
         return self._control_operations.dispatched_for_participant(participant_id)

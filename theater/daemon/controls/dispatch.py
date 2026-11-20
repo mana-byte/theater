@@ -14,6 +14,7 @@ from theater.daemon.controls._common import (
     ACTION_SEND,
     QUEUE_ORIGIN_SEND,
     SEND_REJECTED_ERROR_CODE,
+    _deferred_unbound,
     _error_code_of,
 )
 from theater.daemon.controls._host import ControlHost
@@ -252,6 +253,37 @@ class DispatchControls(ControlHost):
                 participant_id,
             )
             return QueueDispatchOutcome(deferred=True)
+        return await self._dispatch_unpinned_head(participant_id, head, job, route)
+
+    async def _dispatch_unpinned_head(
+        self, participant_id: str, head: ControlOperation, job: Job, route: ControlRoute
+    ) -> QueueDispatchOutcome:
+        """A queued head without a provider pin on a non-native route.
+
+        A never-dispatched deferred intent may late-bind to the current provider terminal —
+        but a row bound to a known native session is never failed over to the pane.
+        """
+        if route.is_provider and _deferred_unbound(head):
+            if head.native_session_id is not None:
+                return self._fail_queued_item(
+                    head,
+                    job,
+                    StaleTarget(
+                        f"queued followup of {participant_id!r} is bound to native "
+                        f"session {head.native_session_id!r}; it is never failed over "
+                        "to the provider pane"
+                    ),
+                )
+            selected = self._select_queued_route(
+                head,
+                transport=ControlTransport.PROVIDER_TERMINAL,
+                backend_generation=head.backend_generation,
+                native_session_id=head.native_session_id,
+                payload=head.payload,
+            )
+            if selected is None:
+                return QueueDispatchOutcome(deferred=True, skip=True)
+            return await self._dispatch_head_provider(participant_id, selected, job, route)
         return await self._refuse_unbound_queued(participant_id, head, job)
 
     async def _dispatch_head_provider(
@@ -289,14 +321,28 @@ class DispatchControls(ControlHost):
             terminal.terminal_incarnation,
         )
         if pinned != current:
-            return self._fail_queued_item(
-                head,
-                job,
-                StaleTarget(
-                    f"provider terminal identity for participant {participant_id!r} changed; "
-                    "the queued prompt is never replayed or failed over"
-                ),
-            )
+            if head.provider_id is None and _deferred_unbound(head):
+                # Late-bind the never-dispatched intent to the just-verified current terminal.
+                bound = self._store.bind_queued_provider_identity(
+                    head.operation_id,
+                    provider_id=terminal.provider_id,
+                    provider_generation=terminal.provider_generation,
+                    terminal_id=terminal.terminal_id,
+                    terminal_incarnation=terminal.terminal_incarnation,
+                    updated_at=self._clock(),
+                )
+                if bound is None:
+                    return QueueDispatchOutcome(deferred=True, skip=True)
+                head = bound
+            else:
+                return self._fail_queued_item(
+                    head,
+                    job,
+                    StaleTarget(
+                        f"provider terminal identity for participant {participant_id!r} changed; "
+                        "the queued prompt is never replayed or failed over"
+                    ),
+                )
         if self._store.has_execution_barrier(participant_id):
             return QueueDispatchOutcome(deferred=True)
         queued_handles = {
@@ -420,17 +466,9 @@ class DispatchControls(ControlHost):
             return QueueDispatchOutcome(deferred=True)
         if self._store.active_running_jobs_for_target(participant_id):
             return QueueDispatchOutcome(deferred=True)
-        if head.transport is not ControlTransport.NATIVE_RUNTIME:
-            selected = self._select_queued_route(
-                head,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                payload=None,
-            )
-            if selected is None:
-                return QueueDispatchOutcome(deferred=True, skip=True)
-            head = selected
+        head, early = self._conform_native_head(head, job, snapshot)
+        if early is not None:
+            return early
         if (
             head.backend_generation is None
             or head.native_session_id is None
@@ -461,6 +499,53 @@ class DispatchControls(ControlHost):
             snapshot=snapshot,
         )
         return QueueDispatchOutcome(dispatched=(job.handle,))
+
+    def _conform_native_head(
+        self, head: ControlOperation, job: Job, snapshot
+    ) -> tuple[ControlOperation, QueueDispatchOutcome | None]:
+        """Rebind a queued head to the current native snapshot, or return a terminal outcome.
+
+        Returns ``(head, None)`` when the head is ready for the identity fence. A marked
+        never-dispatched deferred intent adopts the current session on its first bind;
+        a known generation stays a hard fence and only genuinely unknown fields late-bind.
+        """
+        if head.transport is not ControlTransport.NATIVE_RUNTIME:
+            selected = self._select_queued_route(
+                head,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                payload=head.payload if _deferred_unbound(head) else None,
+            )
+            if selected is None:
+                return head, QueueDispatchOutcome(deferred=True, skip=True)
+            head = selected
+        if _deferred_unbound(head) and head.native_session_id is None:
+            if (
+                head.backend_generation is not None
+                and head.backend_generation != snapshot.backend_generation
+            ):
+                return head, self._fail_queued_item(
+                    head,
+                    job,
+                    StaleTarget(
+                        f"the native backend generation of {head.participant_id!r} changed "
+                        f"(reserved generation {head.backend_generation}, now "
+                        f"{snapshot.backend_generation}); the queued followup is never "
+                        "replayed into another backend"
+                    ),
+                )
+            selected = self._select_queued_route(
+                head,
+                transport=ControlTransport.NATIVE_RUNTIME,
+                backend_generation=snapshot.backend_generation,
+                native_session_id=snapshot.native_session_id,
+                payload=head.payload,
+            )
+            if selected is None:
+                return head, QueueDispatchOutcome(deferred=True, skip=True)
+            head = selected
+        return head, None
 
     def _fail_queued_item(
         self, operation: ControlOperation, job: Job, exc: Exception
