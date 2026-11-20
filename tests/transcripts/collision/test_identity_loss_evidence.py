@@ -1,9 +1,11 @@
-"""Identity-loss evidence bound to another live participant or harness is rejected."""
+"""Foreign transcript ownership disqualifies identity-loss evidence."""
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
+
+import pytest
 
 from tests.support.collision_rig import accept_bound_source, trust_pin, write_claude_transcript
 from tests.support.collision_rig import collision_registry as shared_collision_registry
@@ -18,15 +20,11 @@ vibe_tree = shared_vibe_tree  # the shared fixture
 collision_registry = shared_collision_registry  # the shared fixture
 
 
-async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejected(
-    collision_registry, vibe_tree
+@pytest.mark.parametrize("dead", [False, True])
+async def test_identity_loss_evidence_bound_to_another_participant_is_rejected(
+    collision_registry, vibe_tree, dead
 ):
-    """Loss evidence whose location is another live participant's transcript is rejected.
-
-    Proves the full path: the source's ``probe_identity_loss`` actually finds
-    the foreign candidate, the reducer's ownership guard rejects it, and
-    quarantine is never entered — even after two relocate windows.
-    """
+    """A sibling's transcript stays foreign after its owner dies and its live claim is released."""
     harness = VibeHarness(root=vibe_tree["root"])
     harness.observer.screen_reading = lambda _capture: ScreenReading(  # type: ignore[method-assign]
         ScreenKind.WORKING, ScreenConfidence.HIGH
@@ -59,6 +57,10 @@ async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejec
     participant = trust_pin(collision_registry, participant, vibe_tree["transcript_a"])
     source = await accept_bound_source(observer, harness, participant)
 
+    if dead:
+        collision_registry.mark_dead(sibling.id)
+        observer._attachments.release_transcript(sibling.id)
+
     # The probe must actually find transcript_b as a newer candidate.
     evidence = await source.probe_identity_loss()
     assert evidence is not None, "probe must find the foreign candidate"
@@ -66,7 +68,7 @@ async def test_identity_loss_evidence_bound_to_another_live_participant_is_rejec
     assert evidence.session_id == "aa5d2d32-1111-2222-3333"
 
     # The reducer's ownership guard must reject it.
-    assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+    assert observer._evidence_is_bound_to_another_participant(participant.id, evidence)
 
     # Even after two relocate windows, quarantine must not be entered.
     clock = QuietClock()
@@ -108,7 +110,7 @@ async def test_identity_loss_evidence_session_id_matching_another_live_participa
         location="/some/other/path",
         session_id="shared-session-id",
     )
-    assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+    assert observer._evidence_is_bound_to_another_participant(participant.id, evidence)
 
 
 async def test_vanished_exact_pin_relocation_matching_a_live_siblings_session_id_is_rejected(
@@ -186,4 +188,4 @@ def test_identity_loss_evidence_cross_harness_location_is_rejected(collision_reg
     from theater.harness.source import IdentityLossEvidence
 
     evidence = IdentityLossEvidence(location=str(vibe_tree["transcript_b"]))
-    assert observer._evidence_is_bound_to_another_live_participant(participant.id, evidence)
+    assert observer._evidence_is_bound_to_another_participant(participant.id, evidence)

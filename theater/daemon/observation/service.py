@@ -219,7 +219,11 @@ class Observer(
             monotonic_fn=self._monotonic,
             config_fn=lambda: self,
             jobs_fn=lambda: self.jobs,
-            live_fn=lambda pid: self.live.registration_for(pid) is not None,
+            # Quarantine disables native status; its screen fallback changes display only.
+            live_fn=lambda pid: (
+                self.live.registration_for(pid) is not None
+                and not self.transcript_identity_lost(pid)
+            ),
             telemetry_fn=(agent_telemetry.record_batch if agent_telemetry is not None else None),
         )
 
@@ -538,7 +542,7 @@ class Observer(
             accept_attachment_fn=partial(self._accept_attachment, completion=context.completion),
             apply_fn=lambda p, b, c, t: self._apply_inner(context, iteration, p, b, c, t),
             on_progress_fn=self._reducer.on_progress,
-            evidence_bound_fn=self._evidence_is_bound_to_another_live_participant,
+            evidence_bound_fn=self._evidence_is_bound_to_another_participant,
             confirm_identity_loss_fn=self._confirm_identity_loss,
             mark_identity_lost_fn=partial(
                 self.mark_transcript_identity_lost, finish_fn=context.completion.finish
