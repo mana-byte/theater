@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 from regie.ui_constants import REGIE_ROUTE_COLORS, REGIE_UNREAD_STYLE, REGIE_WAITING_FRAMES
 from regie.widgets import ParticipantTree
@@ -59,7 +59,17 @@ async def test_a_finished_turn_nobody_reads_recolours_its_glyph_until_the_cursor
     monkeypatch,
 ) -> None:
     monkeypatch.setattr("regie.widgets.tree_parts.motion.REGIE_UNREAD_SECONDS", 0.2)
-    app, _client, _presentation = build_app()
+    # Controlled policy clock (same pattern as conftest.py stretched_sweeps): the real
+    # scheduler stays real-time, but elapsed unread time only advances when the test
+    # says so, so a slow CI runner cannot fire the 0.2s deadline mid-assertion.
+    now = [0.0]
+    monkeypatch.setattr(
+        "regie.widgets.tree_parts.motion.time", SimpleNamespace(monotonic=lambda: now[0])
+    )
+    # Sweeps off for this test: the finished-turn wipe also paints "$success" spans, which
+    # the recoloured() predicate cannot tell apart from the unread glyph. The dedicated
+    # sweep test above keeps the default build_app.
+    app, _client, _presentation = build_app(reduce_motion=True)
 
     async with app.run_test() as pilot:
         tree = app.query_one(ParticipantTree)
@@ -73,6 +83,7 @@ async def test_a_finished_turn_nobody_reads_recolours_its_glyph_until_the_cursor
         await _change(app, pilot, "participant-2", "working")
         await _change(app, pilot, "participant-2", "idle")
         assert not recoloured()
+        now[0] = 0.2  # the next real timer fire reruns _sync_unread against this clock
         await wait_until(pilot, recoloured)
 
         tree.select("participant-2")
