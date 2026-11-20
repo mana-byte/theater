@@ -22,6 +22,7 @@ from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCO
 from theater.harness.contracts.runtime import (
     CapabilityUnavailableReason,
     ConnectionHealth,
+    ControlTransport,
     NativeHumanInteraction,
     NativeInteractionKind,
     RuntimeCapability,
@@ -279,8 +280,13 @@ async def test_controls_reports_opencode_native_send_requires_connected_frontend
     assert controls["capabilities"]["steer"]["reason"] == "theater_policy"
     assert controls["capabilities"]["settings_update"]["reason"] == "theater_policy"
 
-    with pytest.raises(RemoteError, match="natively wired"):
-        await client.call("send", target=child.id, prompt="never fall back")
+    # A disconnected native is temporary for sends: the default auto send queues durably
+    # instead of failing closed, and never falls back to the pane.
+    job = await client.call("send", target=child.id, prompt="never fall back")
+    assert job["delivery"] == "queued"
+    (queued_op,) = daemon.store.queued_control_operations(child.id)
+    assert queued_op.transport is ControlTransport.NATIVE_RUNTIME
+    assert json.loads(queued_op.payload or "{}")["deferred_unbound"] is True
 
 
 async def test_controls_reports_the_effective_queue_capability_from_send(client, daemon):
@@ -319,21 +325,22 @@ async def test_controls_requires_a_known_target(client, daemon):
 
 
 async def test_every_control_fails_closed_for_a_disconnected_native_participant(client, daemon):
-    """No blind tmux fallback: the service refuses, and the handlers delegate."""
+    """Sends queue durably; steer/settings/interrupt fail closed. No blind tmux fallback."""
     parent, child = _disconnected_pair(daemon)
     daemon.config.reasoning["vibe"] = ["high"]
 
-    with pytest.raises(RemoteError) as queued:
-        await client.call(
-            "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
-        )
-    assert queued.value.code == "stale_target"
-    assert "natively wired but its runtime is not connected" in queued.value.message
-    assert "the queue_followup is refused and never falls back" in queued.value.message
-    assert "never queued as legacy work" in queued.value.message
-    assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
+    # Queueing to a disconnected native reserves a marked deferred intent that keeps the
+    # known native session as a cross-transport fence.
+    queued_job = await client.call(
+        "participant.queue_followup", target=child.id, prompt="later", caller_id=parent.id
+    )
+    assert queued_job["state"] == "running"
+    (queued_op,) = daemon.store.queued_control_operations(child.id)
+    assert queued_op.transport is ControlTransport.NATIVE_RUNTIME
+    assert queued_op.native_session_id == "thread-gone"
+    assert json.loads(queued_op.payload or "{}")["deferred_unbound"] is True
     controls = await client.call("participant.controls", target=child.id)
-    assert controls["queued"] == [], "no queue reservation was made"
+    assert len(controls["queued"]) == 1, "the queue reservation is durable"
 
     with pytest.raises(RemoteError) as steered:
         await client.call("participant.steer", target=child.id, prompt="amend", caller_id=parent.id)
@@ -355,7 +362,10 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
     assert interrupted.value.code == "stale_target"
     assert "the interrupt is refused and never falls back" in interrupted.value.message
 
-    assert daemon.store.running_jobs_for_target(child.id) == []
+    # The durable queue reservation from above is the only running job.
+    assert [j.handle for j in daemon.store.running_jobs_for_target(child.id)] == [
+        queued_job["handle"]
+    ]
 
     # Authorization runs before classification inside the service: an
     # unauthorized caller learns nothing about the wiring and mutates nothing.
@@ -365,7 +375,9 @@ async def test_every_control_fails_closed_for_a_disconnected_native_participant(
             "participant.queue_followup", target=child.id, prompt="later", caller_id=stranger.id
         )
     assert refused.value.code == "not_your_child"
-    assert daemon.store.running_jobs_for_target(child.id) == []
+    assert [j.handle for j in daemon.store.running_jobs_for_target(child.id)] == [
+        queued_job["handle"]
+    ]
 
 
 async def test_unbound_participants_have_no_terminal_fallback(client, daemon):

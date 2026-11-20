@@ -668,13 +668,14 @@ async def test_second_native_send_while_busy_is_refused_and_counted(
     assert daemon.store.refusal_counts().get("busy") == 1
 
 
-async def test_send_to_a_disconnected_native_participant_fails_closed(
+async def test_send_to_a_disconnected_native_participant_queues_durably(
     client, daemon, terminal_provider
 ):
     """A persisted native binding without a live runtime never falls back to tmux.
 
-    The handler only routes through the control service; the service owns the
-    fail-closed refusal, so its refusal is also what the refusal counter sees.
+    The default auto send treats the disconnection as temporary: the prompt is queued as a
+    marked deferred intent under its own handle, keeps the known native session as a fence,
+    and no pane text is ever sent as a fallback.
     """
     from theater.daemon.persistence.repositories.runtime_bindings import (
         ParticipantRuntimeBinding,
@@ -696,12 +697,12 @@ async def test_send_to_a_disconnected_native_participant_fails_closed(
     )
     sent_before = list(terminal_provider.deliveries)
 
-    with pytest.raises(RemoteError) as raised:
-        await client.call("send", target=child.id, prompt="no fallback", caller_id=parent.id)
+    result = await client.call("send", target=child.id, prompt="no fallback", caller_id=parent.id)
 
-    assert raised.value.code == "stale_target"
-    assert "natively wired but its runtime is not connected" in raised.value.message
-    assert "the send is refused and never falls back" in raised.value.message
+    assert result["delivery"] == "queued"
+    assert result["state"] == "running"
     assert terminal_provider.deliveries == sent_before, "no pane text as a fallback"
-    assert daemon.store.running_jobs_for_target(child.id) == [], "no job was created"
-    assert daemon.store.refusal_counts().get("stale_target") == 1
+    (queued_op,) = daemon.store.queued_control_operations(child.id)
+    assert queued_op.native_session_id == "thread-gone", "the known session stays fenced"
+    assert json.loads(queued_op.payload or "{}")["deferred_unbound"] is True
+    assert [j.handle for j in daemon.store.running_jobs_for_target(child.id)] == [result["handle"]]

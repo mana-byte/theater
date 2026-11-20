@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from theater.constants.daemon import CONTROL_AMBIGUOUS_DELIVERY_DEADLINE_SECONDS
@@ -31,6 +32,26 @@ CANCELLED_ERROR_CODE = "cancelled"
 
 #: Payload ``origin`` of a queued row that a peer's plain ``send`` enqueued (not a parent control).
 QUEUE_ORIGIN_SEND = "send"
+
+#: Payload key marking a queued row admitted while its native runtime was disconnected: a durable
+#: pending intent that has never been dispatched and may late-bind to its first verified route.
+QUEUE_DEFERRED_UNBOUND = "deferred_unbound"
+
+
+def _deferred_unbound(operation: ControlOperation) -> bool:
+    """Whether a queued row is an explicit never-dispatched deferred intent.
+
+    Provenance is carried by the marker, never inferred from null identity fields: historical
+    unpinned rows keep their existing behavior.
+    """
+    if operation.payload is None:
+        return False
+    try:
+        value = json.loads(operation.payload)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get(QUEUE_DEFERRED_UNBOUND) is True
+
 
 #: Delivery outcome labels for the control latency metric.
 CONTROL_DELIVERY_ACCEPTED = DeliveryResult.ACCEPTED.value

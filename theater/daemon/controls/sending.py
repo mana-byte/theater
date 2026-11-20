@@ -259,6 +259,17 @@ class SendControls(ControlHost):
                 prompt=request.prompt,
                 response_format=request.response_format,
             )
+        if runtime is None and not initial_dispatch:
+            # A natively wired participant whose runtime is not connected (startup trust
+            # dialog, detach, recovery) is a temporary condition, not a stale target: an
+            # ordinary send may be queued durably and late-bound when a route is verified.
+            # The spawn initial dispatch keeps the fail-closed refusal below.
+            raise Busy(
+                f"participant {participant_id!r} is natively wired but its runtime is "
+                "not connected; the send is temporarily refused and may be queued or "
+                "retried once the runtime reconnects",
+                details={"next": "wait for the runtime to reconnect, then send again"},
+            )
         prepared = await prepare_native_control(
             self,
             runtime,

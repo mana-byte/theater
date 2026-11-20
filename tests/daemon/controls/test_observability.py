@@ -480,9 +480,10 @@ async def test_no_transport_classification_before_authorization(store, spy, monk
         }
     ]
 
-    # A disconnected native route is classified only after authorization.
+    # A disconnected native route is classified only after authorization; the
+    # refusal is temporary (Busy), not a permanent classification.
     detached = disconnected_native_harness(store, "p2")
-    with pytest.raises(StaleTarget, match="natively wired"):
+    with pytest.raises(Busy, match="temporarily refused"):
         await detached.service.send("p2", caller_id="caller", prompt="no fallback")
     assert calls == ["p2"]
 

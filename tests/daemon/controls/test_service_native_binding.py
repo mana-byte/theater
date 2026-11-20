@@ -1,7 +1,8 @@
-"""Control service native binding: spawn-job reuse and disconnected participants fail closed."""
+"""Control service native binding: spawn-job reuse and disconnected-participant admission."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,10 +11,12 @@ from tests.support.control_harness import (
     Harness,
     disconnected_native_harness,
     make_operation,
+    make_runtime,
     open_harness,
     state_of,
 )
 from tests.support.control_service import native_outcome, operation_rows
+from theater.daemon.controls._common import QUEUE_DEFERRED_UNBOUND
 from theater.daemon.persistence.repositories.runtime_bindings import ParticipantRuntimeBinding
 from theater.daemon.persistence.store import Store
 from theater.harness.builtin.plugins.opencode.manifest import MANIFEST as OPENCODE_MANIFEST
@@ -25,9 +28,11 @@ from theater.harness.contracts.runtime import (
     RuntimeCapability,
     RuntimeLifecyclePhase,
     RuntimeWiring,
+    SessionOpenMode,
 )
 from theater.models import (
     BadRequest,
+    Busy,
     Job,
     JobState,
     NotAddressable,
@@ -275,19 +280,37 @@ def _no_operations_or_jobs(store: Store, participant_id: str) -> None:
     assert store.running_jobs_for_target(participant_id) == []
 
 
-async def test_disconnected_native_send_fails_closed_no_legacy_delivery(store: Store):
-    """A persisted native binding with no runtime is not legacy: no pane send."""
+async def test_disconnected_native_send_is_temporary_and_queues_durably(store: Store):
+    """A disconnected native is a temporary condition, not a stale target.
+
+    A plain send refuses with a retryable ``Busy`` and leaves nothing durable; the seamless
+    ``send_when_safe`` queues the prompt as a marked deferred intent that late-binds when a
+    route is verified. Nothing is ever delivered to the legacy pane.
+    """
     harness = disconnected_native_harness(store, "p1")
 
-    try:
+    with pytest.raises(Busy, match="temporarily refused"):
         await harness.service.send("p1", caller_id="caller", prompt="no fallback")
-        raise AssertionError("a send to a disconnected native must fail closed")
-    except StaleTarget as exc:
-        assert "natively wired" in str(exc)
-        assert "never falls back" in str(exc)
-
     assert ("p1", "caller", "send") in harness.gates_recorder.authorized
-    _no_operations_or_jobs(store, "p1")
+    _no_operations_or_jobs(store, "p1")  # the plain refusal is not durable
+
+    job, queued = await harness.service.send_when_safe("p1", caller_id="caller", prompt="ping")
+    assert queued is True
+    assert job.state == JobState.RUNNING
+    (op,) = store.queued_control_operations("p1")
+    assert op.transport is ControlTransport.NATIVE_RUNTIME
+    assert op.backend_generation == 1  # the known generation is preserved as a fence
+    assert op.native_session_id is None  # never connected: no session scope yet
+    payload = json.loads(op.payload or "{}")
+    assert payload[QUEUE_DEFERRED_UNBOUND] is True
+    assert payload["origin"] == "send"
+
+    # While the runtime is disconnected the queue head defers: no pane delivery, no failure.
+    outcome = await harness.service.dispatch_queue("p1")
+    assert outcome.dispatched == () and outcome.failed == () and outcome.deferred is True
+    (op,) = store.queued_control_operations("p1")
+    assert op.delivery_phase is ControlDeliveryPhase.QUEUED
+    assert store.get_job(job.handle).state == JobState.RUNNING
 
 
 async def test_opencode_routes_supported_controls_native_and_never_falls_back(
@@ -316,26 +339,109 @@ async def test_opencode_routes_supported_controls_native_and_never_falls_back(
     assert harness.service.route_for("p1", RuntimeCapability.STEER).transport is None
     assert harness.service.route_for("p1", RuntimeCapability.SETTINGS_UPDATE).transport is None
 
-    with pytest.raises(StaleTarget, match="natively wired"):
+    with pytest.raises(Busy, match="temporarily refused"):
         await harness.service.send("p1", caller_id="caller", prompt="never fall back")
-    _no_operations_or_jobs(store, "p1")
+    _no_operations_or_jobs(store, "p1")  # the refusal is temporary and leaves nothing durable
 
     with pytest.raises(BadRequest, match="unavailable on its selected transport"):
         await harness.service.steer("p1", caller_id="caller", prompt="never native")
 
 
-async def test_disconnected_native_queue_fails_closed_no_reservation(store: Store):
-    """A disconnected native never reserves a queue slot or creates a job."""
+async def test_disconnected_native_queue_reserves_a_deferred_intent(store: Store):
+    """Queueing to a disconnected native reserves a marked deferred intent, never legacy work."""
     harness = disconnected_native_harness(store, "p1")
 
-    try:
-        await harness.service.queue_followup("p1", caller_id="caller", prompt="never queued")
-        raise AssertionError("a queue_followup to a disconnected native must fail closed")
-    except StaleTarget as exc:
-        assert "natively wired" in str(exc)
+    job = await harness.service.queue_followup("p1", caller_id="caller", prompt="waits")
 
+    assert job.state == JobState.RUNNING
+    assert store.queued_control_operation_count("p1") == 1
+    (op,) = store.queued_control_operations("p1")
+    assert op.transport is ControlTransport.NATIVE_RUNTIME
+    assert op.backend_generation == 1
+    assert op.native_session_id is None
+    assert json.loads(op.payload or "{}")[QUEUE_DEFERRED_UNBOUND] is True
+
+
+async def test_disconnected_native_deferred_intent_late_binds_native_on_reconnect(store: Store):
+    """A never-connected deferred intent adopts the current session when the runtime connects.
+
+    The generation fence still applies: a mismatched reserved generation fails closed.
+    """
+    harness = disconnected_native_harness(store, "p1")
+    job, queued = await harness.service.send_when_safe("p1", caller_id="caller", prompt="ping")
+    assert queued is True
+
+    runtime = make_runtime("p1", generation=1)
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    harness.runtimes["p1"] = runtime
+
+    outcome = await harness.service.dispatch_queue("p1")
+
+    assert outcome.dispatched == (job.handle,)
+    assert outcome.failed == ()
+    assert state_of(harness, "p1").sent == ["ping"]
+    (op,) = store.control_operations_for_job(job.handle)
+    assert op.delivery_phase is ControlDeliveryPhase.SETTLED
+    assert op.delivery_result is DeliveryResult.ACCEPTED
+    assert op.transport is ControlTransport.NATIVE_RUNTIME
+    assert op.native_session_id == state_of(harness, "p1").native_session_id
+    assert op.backend_generation == 1
+    # The provenance marker survives the still-queued route rebind.
+    assert json.loads(op.payload or "{}")[QUEUE_DEFERRED_UNBOUND] is True
+
+
+async def test_disconnected_native_deferred_intent_fails_on_generation_mismatch(store: Store):
+    """A deferred intent with a known generation is never replayed into another backend."""
+    harness = disconnected_native_harness(store, "p1")
+    job, _queued = await harness.service.send_when_safe("p1", caller_id="caller", prompt="ping")
+    # The persisted binding moves to a new backend generation while disconnected.
+    store.upsert_runtime_binding(
+        ParticipantRuntimeBinding(
+            participant_id="p1",
+            harness="codex",
+            wiring=RuntimeWiring.NATIVE,
+            backend_generation=2,
+            lifecycle=RuntimeLifecyclePhase.BOUND,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    runtime = make_runtime("p1", generation=2)
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    harness.runtimes["p1"] = runtime
+
+    outcome = await harness.service.dispatch_queue("p1")
+
+    assert outcome.dispatched == ()
+    assert outcome.failed == ((job.handle, "stale_target"),)
+    assert store.get_job(job.handle).state == JobState.CRASHED
     assert store.queued_control_operation_count("p1") == 0
-    _no_operations_or_jobs(store, "p1")
+
+
+async def test_disconnected_native_deferred_intent_survives_restart(store: Store):
+    """A marked deferred intent is durable: restart recovery leaves it queued to late-bind."""
+    harness = disconnected_native_harness(store, "p1")
+    job, _queued = await harness.service.send_when_safe("p1", caller_id="caller", prompt="ping")
+
+    failed = harness.service.fail_undelivered_followups(["p1"])
+
+    assert failed == []
+    assert store.get_job(job.handle).state == JobState.RUNNING
+    (op,) = store.queued_control_operations("p1")
+    assert op.delivery_phase is ControlDeliveryPhase.QUEUED
+    assert json.loads(op.payload or "{}")[QUEUE_DEFERRED_UNBOUND] is True
+
+
+async def test_disconnected_native_deferred_admission_does_not_supersede_a_spawn_job(store: Store):
+    """Queueing a deferred intent never finishes an unrelated running spawn job."""
+    harness = disconnected_native_harness(store, "p1")
+    spawn = _spawn_job(harness, "p1")
+
+    job, queued = await harness.service.send_when_safe("p1", caller_id="caller", prompt="ping")
+
+    assert queued is True and job.handle != spawn.handle
+    assert store.get_job(spawn.handle).state == JobState.RUNNING
+    assert ("p1", "crashed") not in harness.jobs.finishes
 
 
 async def test_disconnected_native_steer_settings_interrupt_fail_closed(store: Store):

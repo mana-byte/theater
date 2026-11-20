@@ -17,8 +17,10 @@ from theater.daemon.controls._common import (
     ACTION_QUEUE_FOLLOWUP,
     ACTION_SEND,
     CONTROL_DELIVERY_QUEUED,
+    QUEUE_DEFERRED_UNBOUND,
     QUEUE_ORIGIN_SEND,
     NativeControlPreparation,
+    _deferred_unbound,
     prepare_native_control,
 )
 from theater.daemon.controls._host import ControlHost
@@ -33,6 +35,7 @@ from theater.harness.contracts.runtime import (
     ControlTransport,
     RuntimeCapability,
     RuntimeSnapshot,
+    RuntimeWiring,
 )
 from theater.models import BadRequest, Busy, Job, JobState, NotYourChild
 
@@ -62,6 +65,9 @@ class _FollowupRoute:
     generation: int | None = None
     session: str | None = None
     predecessor: str | None = None
+    #: Admitted while the native runtime was disconnected: a durable pending intent that
+    #: late-binds to its first verified route at dispatch, never delivered as legacy pane work.
+    deferred: bool = False
 
 
 class FollowupControls(ControlHost):
@@ -224,6 +230,16 @@ class FollowupControls(ControlHost):
             return _FollowupRoute(route)
         if not route.is_native:
             return _FollowupRoute(route)
+        if runtime is None:
+            # Natively wired but not connected (startup, detach, recovery): queue as a durable
+            # pending intent instead of refusing. Known generation and session are preserved
+            # as per-field fences; only genuinely unknown fields late-bind at dispatch.
+            binding = self._store.get_runtime_binding(participant_id)
+            if binding is not None and binding.wiring is RuntimeWiring.NATIVE:
+                generation, session = binding.backend_generation, binding.native_session_id
+            else:
+                generation, session = None, None
+            return _FollowupRoute(route, None, generation, session, None, deferred=True)
         prepared = await prepare_native_control(
             self,
             runtime,
@@ -268,6 +284,16 @@ class FollowupControls(ControlHost):
                 callback_operation_id=request.callback_operation_id,
             )
             self._store.set_queued_control_payload(operation_id, payload or "{}")
+        elif prepared.deferred:
+            payload = self._queue_payload(
+                predecessor=None,
+                callback_operation_id=(
+                    request.callback_operation_id or self._callback_operation_id(reserved)
+                ),
+                origin=self._queue_origin(reserved),
+                deferred=True,
+            )
+            self._store.set_queued_control_payload(operation_id, payload or "{}")
         job = self._require_job(reserved.job_handle)
         self.schedule_dispatch(request.participant_id)
         return job, reserved.transport.value
@@ -287,6 +313,7 @@ class FollowupControls(ControlHost):
                 predecessor=prepared.predecessor,
                 callback_operation_id=request.callback_operation_id,
                 origin=request.origin,
+                deferred=prepared.deferred,
             )
             timestamp = self._clock()
             # The job and its control row commit together: a handle never exists half-admitted.
@@ -401,6 +428,7 @@ class FollowupControls(ControlHost):
         predecessor: str | None,
         callback_operation_id: str | None,
         origin: str | None = None,
+        deferred: bool = False,
     ) -> str | None:
         values = {
             key: value
@@ -408,6 +436,7 @@ class FollowupControls(ControlHost):
                 ("queue_predecessor_turn", predecessor),
                 ("callback_operation_id", callback_operation_id),
                 ("origin", origin),
+                (QUEUE_DEFERRED_UNBOUND, True if deferred else None),
             )
             if value is not None
         }
@@ -451,6 +480,7 @@ class FollowupControls(ControlHost):
                 predecessor=turn,
                 callback_operation_id=self._callback_operation_id(operation),
                 origin=self._queue_origin(operation),
+                deferred=_deferred_unbound(operation),
             )
             assert payload is not None
             if (
