@@ -194,6 +194,77 @@ def test_claude_approval_footer_classifies_as_approval_with_high_confidence():
     assert reading.confidence is ScreenConfidence.HIGH
 
 
+@pytest.mark.parametrize(
+    ("capture", "expected", "confidence"),
+    [
+        pytest.param(
+            "Do you want to proceed?\n  Yes\n  No\nEsc to cancel",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
+            id="permission-footer",
+        ),
+        # Captured from a real Claude 2.1.327 AskUserQuestion dialog in a 100-column
+        # PTY: the footer is capitalized "Esc to cancel", and an option's own text
+        # ("1. esc to interrupt") must not turn the dialog into WORKING.
+        pytest.param(
+            "☐ Shortcut\nWhich shortcut should stop the editor?\n❯1.esc to interrupt\n"
+            "First shortcut\n2.ctrl+c\nSecond shortcut\n3. Type something.\n"
+            "────────────────\n4.Chat about this\n"
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
+            id="captured-question-dialog",
+        ),
+        # At 40 columns the same footer wraps ("Esc\nto cancel"); the match must
+        # survive the line break.
+        pytest.param(
+            "Enter to select · ↑/↓ to navigate · Esc\nto cancel",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
+            id="wrapped-footer-40col",
+        ),
+        # Lowercase cancel prose in the scrollback is not the dialog footer.
+        pytest.param(
+            "The editor hint says esc to cancel.\nReading files...\nesc to interrupt",
+            ScreenKind.WORKING,
+            ScreenConfidence.HIGH,
+            id="lowercase-cancel-prose-while-working",
+        ),
+        # Capitalized prose above a live working footer is scrollback, not a current
+        # modal: the kind stays APPROVAL for the legacy display path, but confidence
+        # drops to LOW so the native-status override can ignore it.
+        pytest.param(
+            "The editor hint says Esc to cancel.\n"
+            "⏸ manual mode on · esc to interrupt · ← for agents",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.LOW,
+            id="capitalized-cancel-prose-above-working-footer",
+        ),
+        # An unsent composer draft containing the phrase is not a modal either:
+        # captured from a real 2.1.327 PTY, the bottom line is the mode footer.
+        pytest.param(
+            "❯ The editor hint says Esc to cancel.\n⏸ manual mode on",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.LOW,
+            id="composer-draft-not-a-modal",
+        ),
+        # A question body quoting trust wording must not mask the real cancel footer:
+        # HIGH current-modal evidence is evaluated for every marker before LOW hints.
+        pytest.param(
+            "What does Yes, I trust this folder mean?\n❯1. yes\n2. no\n"
+            "4. Chat about this\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+            ScreenKind.APPROVAL,
+            ScreenConfidence.HIGH,
+            id="trust-wording-in-question-body",
+        ),
+    ],
+)
+def test_claude_cancel_footer_matching(capture, expected, confidence):
+    reading = ClaudeCodeObserver().screen_reading(capture)
+    assert reading.kind is expected
+    assert reading.confidence is confidence
+
+
 def test_claude_idle_footer_classifies_as_prompt():
     """The shortcut hint is the idle evidence when no bare composer line shows."""
     reading = ClaudeCodeObserver().screen_reading(CLAUDE_IDLE)
@@ -279,17 +350,20 @@ def test_claude_partial_or_unproved_task_footer_is_not_a_prompt(footer):
 
 
 @pytest.mark.parametrize(
-    ("marker", "kind"),
+    ("marker", "kind", "confidence"),
     [
-        (CLAUDE_TRUST, ScreenKind.TRUST),
-        (CLAUDE_APPROVAL, ScreenKind.APPROVAL),
-        ("✻ Working… esc to interrupt", ScreenKind.WORKING),
+        # Kind precedence is unchanged: a safety marker anywhere beats the task footer.
+        # But real 2.1.327 PTY captures show a marker above the mode footer is composer
+        # or scrollback text, not a modal, so only the working chrome stays HIGH.
+        (CLAUDE_TRUST, ScreenKind.TRUST, ScreenConfidence.LOW),
+        (CLAUDE_APPROVAL, ScreenKind.APPROVAL, ScreenConfidence.LOW),
+        ("✻ Working… esc to interrupt", ScreenKind.WORKING, ScreenConfidence.HIGH),
     ],
 )
-def test_claude_safety_markers_win_over_task_footer(marker, kind):
+def test_claude_safety_markers_win_over_task_footer(marker, kind, confidence):
     reading = ClaudeCodeObserver().screen_reading(f"{marker}\n{CLAUDE_IDLE_TASK_FOOTER}")
     assert reading.kind is kind
-    assert reading.confidence is ScreenConfidence.HIGH
+    assert reading.confidence is confidence
 
 
 def test_claude_impossible_symbol_indicator_pairing_is_not_a_prompt():

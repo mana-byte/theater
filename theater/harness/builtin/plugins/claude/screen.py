@@ -67,11 +67,29 @@ class ClaudeScreen:
         Trust and approval precede prompt because injecting Enter there changes permissions.
         Working precedes prompt so a mixed frame cannot finish a live turn early.
         """
-        if TRUST_MARKER in capture:
-            return ScreenReading(kind=ScreenKind.TRUST, confidence=ScreenConfidence.HIGH)
-        if APPROVAL_MARKER in capture:
-            return ScreenReading(kind=ScreenKind.APPROVAL, confidence=ScreenConfidence.HIGH)
         tail = screen_tail(capture, _SCREEN_TAIL_LINES)
+        # A current dialog owns the bottom line(s): the footer can wrap in a narrow pane
+        # ("Esc\nto cancel" at 40 columns), so match the last two lines whitespace-
+        # normalized, case-sensitively ("Esc to cancel" renders capitalized in 2.1.327).
+        # The bottom line must not be the mode/working footer — otherwise composer
+        # drafts and scrollback prose read as a live modal. Marker elsewhere in the
+        # capture stays a LOW-confidence hint for the legacy display path.
+        bottom = last_screen_line(capture)
+        footer2 = " ".join(" ".join(tail[-2:]).split()) if tail else ""
+        current_dialog = (
+            bool(footer2) and WORKING_MARKER not in bottom and not _is_mode_line_footer(bottom)
+        )
+        markers = ((TRUST_MARKER, ScreenKind.TRUST), (APPROVAL_MARKER, ScreenKind.APPROVAL))
+        # HIGH current-modal evidence for any marker wins before any LOW scrollback
+        # hint: a question body may quote trust wording while its real footer is the
+        # cancel line.
+        if current_dialog:
+            for marker, kind in markers:
+                if marker in footer2:
+                    return ScreenReading(kind=kind, confidence=ScreenConfidence.HIGH)
+        for marker, kind in markers:
+            if marker in " ".join(capture.split()):
+                return ScreenReading(kind=kind, confidence=ScreenConfidence.LOW)
         if any(WORKING_MARKER in line for line in tail):
             return ScreenReading(kind=ScreenKind.WORKING, confidence=ScreenConfidence.HIGH)
         if last_screen_line(capture) in IDLE_PROMPTS:
