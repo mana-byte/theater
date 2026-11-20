@@ -11,7 +11,9 @@ from __future__ import annotations
 import dataclasses
 import json
 
-from tests.support.control_harness import Harness
+import pytest
+
+from tests.support.control_harness import Harness, make_runtime
 from theater.daemon.controls import ControlService
 from theater.daemon.controls._common import QUEUE_DEFERRED_UNBOUND
 from theater.daemon.persistence.repositories.control_operations import ControlOperation
@@ -21,6 +23,7 @@ from theater.harness.contracts.runtime import (
     ControlKind,
     ControlTransport,
     DeliveryResult,
+    SessionOpenMode,
 )
 from theater.models import AwaitingDecision, JobState, TerminalBindingRecord, now
 
@@ -200,6 +203,44 @@ async def test_provider_modal_dialog_still_defers_a_late_bound_intent(store: Sto
     assert op.delivery_phase is ControlDeliveryPhase.QUEUED
     assert op.transport is ControlTransport.PROVIDER_TERMINAL
     assert store.get_job(handle).state == JobState.RUNNING
+
+
+@pytest.mark.parametrize("generation", [1, 2])
+async def test_provider_modal_deferral_preserves_generation_on_native_reconnect(
+    store: Store, generation: int
+):
+    """An unbound provider selection cannot erase the originally reserved native generation."""
+
+    async def modal_check(participant_id: str) -> None:
+        raise AwaitingDecision(f"dialog open at {participant_id!r}")
+
+    harness, deliveries = _provider_harness(store, modal_check=modal_check)
+    operation_id, handle = _queue_row(store, harness, generation=1)
+    assert (await harness.service.dispatch_queue("p1")).deferred is True
+    op = store.get_control_operation(operation_id)
+    assert op.transport is ControlTransport.PROVIDER_TERMINAL
+    assert op.provider_id is None
+
+    runtime = make_runtime("p1", generation=generation)
+    await runtime.open_session(mode=SessionOpenMode.NEW)
+    harness.runtimes["p1"] = runtime
+
+    outcome = await harness.service.dispatch_queue("p1")
+
+    assert deliveries == []
+    op = store.get_control_operation(operation_id)
+    assert op.backend_generation == 1
+    if generation == 1:
+        assert outcome.dispatched == (handle,)
+        assert outcome.failed == ()
+        assert runtime.state.sent == ["ping"]
+        assert op.native_session_id == runtime.state.native_session_id
+    else:
+        assert outcome.dispatched == ()
+        assert outcome.failed == ((handle, "stale_target"),)
+        assert runtime.state.sent == []
+        assert op.native_session_id is None
+        assert store.get_job(handle).state == JobState.CRASHED
 
 
 async def test_bound_provider_row_still_never_fails_over_on_terminal_change(store: Store):

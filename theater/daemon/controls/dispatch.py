@@ -28,6 +28,7 @@ from theater.harness.contracts.runtime import (
     DeliveryResult,
     HarnessRuntime,
     RuntimeCapability,
+    RuntimeSnapshot,
 )
 from theater.models import (
     AwaitingDecision,
@@ -501,46 +502,38 @@ class DispatchControls(ControlHost):
         return QueueDispatchOutcome(dispatched=(job.handle,))
 
     def _conform_native_head(
-        self, head: ControlOperation, job: Job, snapshot
+        self, head: ControlOperation, job: Job, snapshot: RuntimeSnapshot
     ) -> tuple[ControlOperation, QueueDispatchOutcome | None]:
-        """Rebind a queued head to the current native snapshot, or return a terminal outcome.
-
-        Returns ``(head, None)`` when the head is ready for the identity fence. A marked
-        never-dispatched deferred intent adopts the current session on its first bind;
-        a known generation stays a hard fence and only genuinely unknown fields late-bind.
-        """
-        if head.transport is not ControlTransport.NATIVE_RUNTIME:
-            selected = self._select_queued_route(
+        """Late-bind unknown native identity fields without erasing a deferred row's fences."""
+        deferred = _deferred_unbound(head)
+        if (
+            deferred
+            and head.backend_generation is not None
+            and head.backend_generation != snapshot.backend_generation
+        ):
+            return head, self._fail_queued_item(
                 head,
-                transport=ControlTransport.NATIVE_RUNTIME,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                payload=head.payload if _deferred_unbound(head) else None,
+                job,
+                StaleTarget(
+                    f"the native backend generation of {head.participant_id!r} changed "
+                    f"(reserved generation {head.backend_generation}, now "
+                    f"{snapshot.backend_generation}); the queued followup is never "
+                    "replayed into another backend"
+                ),
             )
-            if selected is None:
-                return head, QueueDispatchOutcome(deferred=True, skip=True)
-            head = selected
-        if _deferred_unbound(head) and head.native_session_id is None:
-            if (
-                head.backend_generation is not None
-                and head.backend_generation != snapshot.backend_generation
-            ):
-                return head, self._fail_queued_item(
-                    head,
-                    job,
-                    StaleTarget(
-                        f"the native backend generation of {head.participant_id!r} changed "
-                        f"(reserved generation {head.backend_generation}, now "
-                        f"{snapshot.backend_generation}); the queued followup is never "
-                        "replayed into another backend"
-                    ),
-                )
+        if head.transport is not ControlTransport.NATIVE_RUNTIME or (
+            deferred and (head.backend_generation is None or head.native_session_id is None)
+        ):
+            generation = head.backend_generation if deferred else None
+            session = head.native_session_id if deferred else None
             selected = self._select_queued_route(
                 head,
                 transport=ControlTransport.NATIVE_RUNTIME,
-                backend_generation=snapshot.backend_generation,
-                native_session_id=snapshot.native_session_id,
-                payload=head.payload,
+                backend_generation=(
+                    generation if generation is not None else snapshot.backend_generation
+                ),
+                native_session_id=session if session is not None else snapshot.native_session_id,
+                payload=head.payload if deferred else None,
             )
             if selected is None:
                 return head, QueueDispatchOutcome(deferred=True, skip=True)
