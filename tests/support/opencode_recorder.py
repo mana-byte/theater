@@ -64,6 +64,30 @@ class Recorder:
         }
         self.write(mid, "assistant", data, at=at)
 
+    def enable_part_rows(self) -> None:
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_part ("
+            "message_id TEXT NOT NULL, session_id TEXT NOT NULL, ordinal INTEGER NOT NULL, "
+            "type TEXT NOT NULL, call_id TEXT, time_created INTEGER NOT NULL, "
+            "time_updated INTEGER NOT NULL, data TEXT NOT NULL, "
+            "PRIMARY KEY (message_id, ordinal))"
+        )
+        self.conn.commit()
+
+    def write_part(self, mid: str, ordinal: int, part: dict, *, at: int | None = None) -> None:
+        """Insert or update one `session_part` row without touching `session_message`."""
+        self.enable_part_rows()
+        at = self.tick() if at is None else at
+        call_id = part.get("id") if part.get("type") == "tool" else None
+        self.conn.execute(
+            "INSERT INTO session_part VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(message_id, ordinal) DO UPDATE "
+            "SET type = excluded.type, call_id = excluded.call_id, "
+            "time_updated = excluded.time_updated, data = excluded.data",
+            (mid, self.sid, ordinal, part.get("type", "text"), call_id, at, at, json.dumps(part)),
+        )
+        self.conn.commit()
+
     def idle(self, mid: str, outcome: str) -> None:
         self.write(mid, "idle", {"time": {"created": self.tick()}, "outcome": outcome})
 
