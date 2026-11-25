@@ -130,6 +130,7 @@ def test_context_rejects_invalid_values() -> None:
         ("pane_pid_zero", "pane_pid", 0, ValueError),
         ("pane_pid_negative", "pane_pid", -1, ValueError),
         ("participant_scoped_int", "participant_scoped", 1, TypeError),
+        ("daemon_restart_int", "daemon_restart", 1, TypeError),
         ("session_provenance_int", "session_provenance", 1, TypeError),
     ]
 

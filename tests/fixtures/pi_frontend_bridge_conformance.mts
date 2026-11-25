@@ -907,8 +907,59 @@ async function main(): Promise<void> {
 			),
 		);
 		assert.equal(clearedSnapshot.pending_interaction, null);
+		// Blocking extension UI prompts (e.g. approval-modes confirm/select)
+		// park mid-turn as pending_interaction and clear on ui_prompt_end, while
+		// idle pickers are ignored.
+		await interactionApi.emit("ui_prompt_start", {
+			reason: "ui_prompt",
+			kind: "select",
+			title: "Approve bash?\nrm -rf /tmp/demo",
+		});
+		const uiPromptSnapshot = snapshotFrom(
+			await host.take(
+				(frame) =>
+					frame.type === "snapshot" &&
+					isRecord(frame.snapshot) &&
+					frame.snapshot.pending_interaction !== null &&
+					(frame.snapshot.snapshot_revision as number) >
+						(clearedSnapshot.snapshot_revision as number),
+				"ui-prompt pending-interaction snapshot",
+			),
+		);
+		const uiPending = uiPromptSnapshot.pending_interaction as JsonRecord;
+		assert.equal(uiPending.kind, "approval");
+		assert.equal(uiPending.details, "Approve bash?");
+		assert.equal(uiPending.native_turn_id, null);
+		await interactionApi.emit("ui_prompt_end", {
+			reason: "ui_prompt",
+			kind: "select",
+		});
+		const uiClearedSnapshot = snapshotFrom(
+			await host.take(
+				(frame) =>
+					frame.type === "snapshot" &&
+					isRecord(frame.snapshot) &&
+					(frame.snapshot.snapshot_revision as number) >
+						(uiPromptSnapshot.snapshot_revision as number),
+				"ui-prompt cleared snapshot",
+			),
+		);
+		assert.equal(uiClearedSnapshot.pending_interaction, null);
 		interactionApi.idle = true;
 		await interactionApi.emit("agent_settled");
+		// An idle UI prompt (such as a slash-command picker) must not park status.
+		await interactionApi.emit("ui_prompt_start", {
+			reason: "ui_prompt",
+			kind: "select",
+			title: "Approval mode",
+		});
+		const duringIdlePrompt = await host.request("pi.snapshot", {});
+		assert.ok(isRecord(duringIdlePrompt.result));
+		assert.equal(duringIdlePrompt.result.pending_interaction, null);
+		await interactionApi.emit("ui_prompt_end", {
+			reason: "ui_prompt",
+			kind: "select",
+		});
 		interactionApi.idle = false;
 		await interactionApi.emit("agent_start");
 		await interactionApi.emit("tool_call", {
@@ -916,7 +967,9 @@ async function main(): Promise<void> {
 			toolCallId: "q2",
 		});
 		await interactionApi.emit("agent_settled");
-
+		const afterSettle = await host.request("pi.snapshot", {});
+		assert.ok(isRecord(afterSettle.result));
+		assert.equal(afterSettle.result.pending_interaction, null);
 		await api.emit("session_shutdown", { reason: "exit" });
 	} finally {
 		api.authGate.resolve(undefined);

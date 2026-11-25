@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,12 +76,48 @@ def check_publication_context(root: Path, environ: Mapping[str, str]) -> None:
         raise PolicyChangeError(f"publication checkout is dirty: {sorted(changed)}")
 
 
+_GH_TRANSIENT_MARKERS = (
+    "unexpected end of JSON input",
+    "HTTP 500",
+    "HTTP 502",
+    "HTTP 503",
+    "HTTP 504",
+    "EOF",
+    "connection reset by peer",
+    "TLS handshake timeout",
+)
+
+
+def _is_transient_gh_error(stderr: str) -> bool:
+    return any(marker in stderr for marker in _GH_TRANSIENT_MARKERS)
+
+
+def _gh_is_read_only(args: tuple[str, ...]) -> bool:
+    if len(args) >= 2 and args[0] == "pr" and args[1] == "list":
+        return True
+    if not args or args[0] != "api":
+        return False
+    if "--method" in args:
+        idx = args.index("--method")
+        return idx + 1 < len(args) and args[idx + 1].upper() == "GET"
+    return "--input" not in args
+
+
 def run_gh(*args: str) -> str:
     """Argument lists and temporary request/body files keep shell interpolation out of gh."""
-    done = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120, check=False)
-    if done.returncode:
-        raise RuntimeError(f"gh {' '.join(args[:2])} failed: {done.stderr.strip()}")
-    return done.stdout
+    attempts = 3 if _gh_is_read_only(args) else 1
+    for attempt in range(attempts):
+        done = subprocess.run(
+            ["gh", *args], capture_output=True, text=True, timeout=120, check=False
+        )
+        if not done.returncode:
+            return done.stdout
+        stderr = done.stderr.strip()
+        if attempt + 1 < attempts and _is_transient_gh_error(stderr):
+            time.sleep(2.0 * (attempt + 1))
+            continue
+        raise RuntimeError(f"gh {' '.join(args[:2])} failed: {stderr}")
+    raise AssertionError("unreachable")
 
 
 def api(gh: Gh, path: str, *, method: str = "GET", body: dict[str, Any] | None = None) -> Any:
@@ -157,13 +194,45 @@ def _write_issue(
         body["title"] = title
     elif section == "report" and previous["state"] == "closed":
         body["state"] = "open"
-    result = api(
-        gh,
-        "issues" if number is None else f"issues/{number}",
-        method="POST" if number is None else "PATCH",
-        body=body,
+    try:
+        result = api(
+            gh,
+            "issues" if number is None else f"issues/{number}",
+            method="POST" if number is None else "PATCH",
+            body=body,
+        )
+        return int(result["number"])
+    except RuntimeError as exc:
+        if number is not None or not _is_transient_gh_error(str(exc)):
+            raise
+        # A transient error on POST /issues (e.g. gh's empty-body 5xx) may happen either
+        # before or after GitHub created the issue. Check before retrying to avoid duplicates.
+        existing = _find_issue_by_title(gh, title)
+        if existing is not None:
+            return existing
+        time.sleep(2.0)
+        result = api(gh, "issues", method="POST", body=body)
+        return int(result["number"])
+
+
+def _find_issue_by_title(gh: Gh, title: str) -> int | None:
+    listing = gh(
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/{owner}/{repo}/issues",
+        "--method",
+        "GET",
+        "-f",
+        "state=all",
+        "-f",
+        "per_page=100",
     )
-    return int(result["number"])
+    for page in json.loads(listing):
+        for item in page:
+            if not item.get("pull_request") and item.get("title") == title:
+                return int(item["number"])
+    return None
 
 
 def issue_title(harness: str, version: str) -> str:
@@ -311,16 +380,8 @@ def _commit_policy(
         )
 
 
-def _policy_branch(harness: str, gh: Gh) -> _PolicyBranch:
-    """Read and validate the pending branch without changing GitHub."""
-    branch = f"chore/compat-{harness}"
-    main = api(gh, "git/ref/heads/main")["object"]["sha"]
-    current = _policy_at(gh, harness, main)
-    refs = api(gh, f"git/matching-refs/heads/{branch}")
-    head = next(
-        (ref["object"]["sha"] for ref in refs if ref["ref"] == f"refs/heads/{branch}"), None
-    )
-    prs = json.loads(
+def _open_prs(gh: Gh, branch: str) -> list[dict[str, Any]]:
+    return json.loads(
         gh(
             "pr",
             "list",
@@ -334,6 +395,18 @@ def _policy_branch(harness: str, gh: Gh) -> _PolicyBranch:
             "number",
         )
     )
+
+
+def _policy_branch(harness: str, gh: Gh) -> _PolicyBranch:
+    """Read and validate the pending branch without changing GitHub."""
+    branch = f"chore/compat-{harness}"
+    main = api(gh, "git/ref/heads/main")["object"]["sha"]
+    current = _policy_at(gh, harness, main)
+    refs = api(gh, f"git/matching-refs/heads/{branch}")
+    head = next(
+        (ref["object"]["sha"] for ref in refs if ref["ref"] == f"refs/heads/{branch}"), None
+    )
+    prs = _open_prs(gh, branch)
     if len(prs) > 1 or (prs and head is None):
         raise PolicyChangeError("the shared policy PR has an ambiguous or missing branch")
     pending = current
@@ -398,16 +471,21 @@ def _publish_policy(
         ),
     }
     if number is None:
-        number = api(
-            gh,
-            "pulls",
-            method="POST",
-            body={
-                **body,
-                "base": "main",
-                "head": branch.name,
-            },
-        )["number"]
+        create_body = {**body, "base": "main", "head": branch.name}
+        try:
+            number = api(gh, "pulls", method="POST", body=create_body)["number"]
+        except RuntimeError as exc:
+            if not _is_transient_gh_error(str(exc)):
+                raise
+            # GitHub rejects duplicate open PRs for the same head/base, and a transient
+            # response error may occur after creation: look up before retrying once.
+            prs = _open_prs(gh, branch.name)
+            if prs:
+                number = prs[0]["number"]
+                api(gh, f"pulls/{number}", method="PATCH", body=body)
+            else:
+                time.sleep(2.0)
+                number = api(gh, "pulls", method="POST", body=create_body)["number"]
     else:
         api(gh, f"pulls/{number}", method="PATCH", body=body)
     return number
