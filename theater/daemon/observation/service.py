@@ -175,6 +175,7 @@ class Observer(
         self._restarts: set[asyncio.Task[None]] = set()
         self._restart_pending: set[str] = set()
         self._readiness_recorded: set[str] = set()
+        self._restarted_watches: set[str] = set()
         self._retired: set[str] = set()
         self._unobservable: set[str] = set()
         self._pending_transcripts: set[str] = set()

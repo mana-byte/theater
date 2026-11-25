@@ -114,6 +114,7 @@ class PiTranscriptSource(TranscriptSource):
 
     def __init__(self, *args, **kwargs) -> None:
         self._resume_input = decode_resume(kwargs.pop("source_checkpoint", None))
+        self._daemon_restart = bool(kwargs.pop("daemon_restart", True))
         super().__init__(*args, **kwargs)
         self._backlog: list[PiRecord] = []
         self._records = RecordBuffer(PI_RECORD_BYTES)
@@ -299,7 +300,7 @@ class PiTranscriptSource(TranscriptSource):
         if isinstance(resume, ExactCheckpoint):
             if resume.location == str(path) and file_point_covers(current, resume.point):
                 assert resume.point.size is not None and resume.point.records is not None
-                return (resume.point.size, resume.point.records, True)
+                return (resume.point.size, resume.point.records, self._daemon_restart)
             if resume.location != str(path):
                 return self._rotation_cursor(path)
             return None
@@ -319,12 +320,12 @@ class PiTranscriptSource(TranscriptSource):
             cursor = _switch_cursor(path, boundary)
             if cursor is None:
                 return _WAIT_FOR_SWITCH
-            return (*cursor, self._known_location is not None)
+            return (*cursor, self._known_location is not None and self._daemon_restart)
         floor_cursor = self._floor_cursor(resume, current)
         if floor_cursor is None:
             return None
         offset, index = floor_cursor
-        if self._known_location is not None:
+        if self._known_location is not None and self._daemon_restart:
             return (offset, index, True)
         return (offset, index, False)
 

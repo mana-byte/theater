@@ -219,6 +219,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         session_provenance: str | TranscriptProvenance | None = None,
         known_location: str | None = None,
         source_checkpoint: str | None = None,
+        daemon_restart: bool = True,
     ) -> Source:
         root = self._source_root(cwd)
         reader = self if root == self.root else PiObserver(root=root, isolated=self.isolated)
@@ -233,6 +234,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             collision_domain=str(root),
             known_location=known_location,
             source_checkpoint=source_checkpoint,
+            daemon_restart=daemon_restart,
         )
 
     def open_source_for(
@@ -246,6 +248,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
         known_location: str | None = None,
         transcript_domain: str | None = None,
         source_checkpoint: str | None = None,
+        daemon_restart: bool = True,
     ) -> Source:
         domain = (
             canonical(Path(transcript_domain))
@@ -264,6 +267,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
                 session_provenance=session_provenance,
                 known_location=known_location,
                 source_checkpoint=source_checkpoint,
+                daemon_restart=daemon_restart,
             )
         return self.open_source(
             cwd=cwd,
@@ -272,6 +276,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             session_provenance=session_provenance,
             known_location=known_location,
             source_checkpoint=source_checkpoint,
+            daemon_restart=daemon_restart,
         )
 
     def open_source_context(self, context: ParticipantObservationContext) -> Source:
@@ -284,6 +289,7 @@ class PiObserver(PiParserMixin, TranscriptObserver):
             known_location=context.known_location,
             transcript_domain=context.transcript_domain,
             source_checkpoint=context.source_checkpoint,
+            daemon_restart=context.daemon_restart,
         )
 
     def find_transcript(

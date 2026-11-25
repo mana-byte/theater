@@ -360,6 +360,55 @@ def test_pi_restart_resumes_from_the_current_source_checkpoint(tmp_path) -> None
     assert batch.trajectory == ()
 
 
+def test_pi_in_process_watch_recompose_preserves_semantic_events_after_checkpoint(
+    tmp_path,
+) -> None:
+    """An in-process watch recompose (daemon_restart=False) must not downgrade unread turns."""
+    workdir = tmp_path / "work"
+    sessions = tmp_path / "sessions"
+    workdir.mkdir()
+    sessions.mkdir()
+    transcript = sessions / "native-id.jsonl"
+    append(transcript, session_record(session_id="native-id", cwd=workdir))
+
+    first = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir), session_id="native-id"
+    )
+    assert asyncio.run(first.read()).attached is not None
+    first.commit_attachment()
+    first.acknowledge_source_checkpoint()
+    checkpoint = first.source_checkpoint()
+    assert checkpoint is not None
+
+    append(
+        transcript,
+        message_record(
+            "assistant-1",
+            {
+                "role": "assistant",
+                "content": "hello",
+                "stopReason": "stop",
+                "usage": {"input": 5, "output": 1},
+            },
+        ),
+    )
+
+    recomposed = PiObserver(root=sessions, isolated=True).open_source(
+        cwd=str(workdir),
+        session_id="native-id",
+        known_location=str(transcript),
+        source_checkpoint=checkpoint,
+        daemon_restart=False,
+    )
+    attached = asyncio.run(recomposed.read()).attached
+    assert attached is not None
+    recomposed.commit_attachment()
+    batch = asyncio.run(recomposed.read())
+    assert [event.text for event in batch.events if event.text] == ["hello"]
+    assert all(not event.usage_only for event in batch.events)
+    assert any(event.turn_end for event in batch.events)
+
+
 def test_pi_revoke_retains_raw_resume_input_for_exact_reattachment(tmp_path) -> None:
     workdir = tmp_path / "work"
     sessions = tmp_path / "sessions"
