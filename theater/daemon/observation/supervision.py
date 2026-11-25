@@ -52,6 +52,7 @@ class WatchSupervision:
         registry: Registry
         _restart_pending: set[str]
         _restarts: set[asyncio.Task[None]]
+        _restarted_watches: set[str]
         _retired: set[str]
         _source_processes: dict[str, ObservationProcess | None]
         _stopping: asyncio.Event
@@ -87,6 +88,7 @@ class WatchSupervision:
         self._restarts.clear()
         self._restart_pending.clear()
         self._readiness_recorded.clear()
+        self._restarted_watches.clear()
         # Retained evidence only exists between a failed routing and its
         # retry; shutdown ends the retry loop, so the in-memory set goes too.
         self._pending_evidence.clear()
@@ -95,6 +97,7 @@ class WatchSupervision:
     async def reset_for_operator_bind(self, pid: str) -> None:
         task = self._tasks.pop(pid, None)
         self._retired.discard(pid)
+        self._restarted_watches.discard(pid)
         self._channel_health.pop(pid, None)
         self._clear_primary_channel_health(pid)
         self._attachments._reset_watch_state.discard(pid)
@@ -241,7 +244,12 @@ class WatchSupervision:
                     with contextlib.suppress(Exception, asyncio.CancelledError):
                         await task
                 await self._flush_pending_evidence(participant_id)
+                restarted_watches = getattr(self, "_restarted_watches", None)
+                if restarting and restarted_watches is not None:
+                    restarted_watches.add(participant_id)
                 self._start_watch(participant_id)
+                if participant_id not in self._tasks and restarted_watches is not None:
+                    restarted_watches.discard(participant_id)
         finally:
             # Keep the participant pending through old-watch cleanup and the
             # replacement start. Any number of intervening registration

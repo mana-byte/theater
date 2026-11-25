@@ -43,6 +43,7 @@ class SourceChannels:
         otel_runtime: NativeOtelRuntime | None
         _pending_transcripts: set[str]
         _primary_channel_health: dict[tuple[str, str], ChannelHealthTracker]
+        _restarted_watches: set[str]
         store: Store
 
     def channel_health_snapshot(self, participant_id: str) -> tuple[ChannelHealth, ...]:
@@ -61,7 +62,9 @@ class SourceChannels:
         p = self.store.get_participant(pid)
         if p is None:
             return None
-        source = self._open_durable_source(p, observer)
+        restarted = pid in self._restarted_watches
+        self._restarted_watches.discard(pid)
+        source = self._open_durable_source(p, observer, daemon_restart=not restarted)
         bindings = self._enrichment_bindings(p, observer)
         primary_method = getattr(observer, "primary_channel_declaration", None)
         primary = primary_method() if callable(primary_method) else None
@@ -114,7 +117,11 @@ class SourceChannels:
         return source
 
     def _open_durable_source(
-        self, participant: Participant, observer: HarnessObserver
+        self,
+        participant: Participant,
+        observer: HarnessObserver,
+        *,
+        daemon_restart: bool = True,
     ) -> Source | None:
         if not observer.has_transcript or participant.cwd is None:
             return None
@@ -131,6 +138,7 @@ class SourceChannels:
             source_checkpoint=participant.source_checkpoint,
             pane_pid=observation_process_id(self.store, participant),
             adopted=participant.tier is Tier.ADOPTED,
+            daemon_restart=daemon_restart,
         )
 
     def _enrichment_bindings(

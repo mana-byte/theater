@@ -334,3 +334,92 @@ async def test_failed_pi_live_registration_closes_only_the_optional_runtime(
         assert daemon.registry.get(participant.id).tmux_pane == participant.tmux_pane
     finally:
         await peer.close()
+
+
+async def test_pi_frontend_connect_recompose_completes_inflight_launch_turn(
+    terminal_provider,
+    monkeypatch,
+    tmp_path,
+):
+    """Connecting the passive Pi frontend mid-launch must not drop the launch turn as usage-only."""
+    from tests.support.pi_transcripts import append, message_record, session_record
+    from theater.harness.builtin.plugins.pi.launch import participant_root
+
+    terminal_provider.terminals.clear()
+    daemon = Daemon(harnesses={})
+    await daemon.start()
+    peer = None
+    try:
+        harness = _install(monkeypatch)
+        daemon.observer.harnesses = {"pi": harness}
+        daemon.observer.poll = 0.02
+        daemon.observer.search = 0.02
+        daemon.observer.sync = 0.02
+        daemon.observer.start()
+
+        participant = await _spawn(
+            daemon,
+            SpawnRequest(
+                harness="pi",
+                prompt="say pong",
+                cwd=str(tmp_path),
+                approval="yolo",
+                wiring=RuntimeWiring.NATIVE,
+            ),
+        )
+        launch = terminal_provider.creations[-1]
+        descriptor = json.loads(Path(launch["env"]["THEATER_PI_FRONTEND_CONFIG"]).read_text())
+        sessions = participant_root(participant.id)
+        transcript = sessions / f"{participant.session_id}.jsonl"
+        append(
+            transcript,
+            session_record(
+                session_id=participant.session_id,
+                cwd=tmp_path,
+                timestamp="2099-01-01T00:00:00.000Z",
+            ),
+        )
+
+        await _wait_for(
+            lambda: (
+                daemon.store.get_participant(participant.id).transcript_location
+                == str(transcript.resolve())
+                and daemon.store.get_participant(participant.id).source_checkpoint is not None
+            )
+        )
+
+        # Append the launch answer right as the watch recomposes for the passive frontend,
+        # after the old durable watch has been cancelled and before the new one attaches.
+        real_open = daemon.observer._open_durable_source
+        appended = False
+
+        def append_on_recompose(p, observer, *, daemon_restart: bool = True):
+            nonlocal appended
+            if p.id == participant.id and not appended:
+                appended = True
+                append(
+                    transcript,
+                    message_record(
+                        "assistant-launch",
+                        {
+                            "role": "assistant",
+                            "content": "pong",
+                            "stopReason": "stop",
+                            "usage": {"input": 5, "output": 1},
+                        },
+                    ),
+                )
+            return real_open(p, observer, daemon_restart=daemon_restart)
+
+        monkeypatch.setattr(daemon.observer, "_open_durable_source", append_on_recompose)
+        peer = PiPeer(participant.session_id)
+        await peer.connect(descriptor)
+        await _wait_for(lambda: daemon.runtime_manager.get(participant.id) is not None)
+        await _wait_for(lambda: daemon.store.get_job(participant.id).state == JobState.DONE)
+        assert appended is True
+        job = daemon.store.get_job(participant.id)
+        assert job.result == "pong"
+    finally:
+        if peer is not None:
+            await peer.close()
+        await daemon.aclose()
