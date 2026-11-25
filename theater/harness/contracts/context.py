@@ -25,6 +25,8 @@ class ParticipantObservationContext:
     participant_scoped: bool = True
     #: The pane was adopted, not spawned: no launch-local identity ever existed.
     adopted: bool = False
+    #: False on an in-process watch recompose; True on fresh open/restart.
+    daemon_restart: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.participant_id, str):
@@ -53,9 +55,14 @@ class ParticipantObservationContext:
                 )
             if self.pane_pid <= 0:
                 raise ValueError("participant observation context pane_pid must be positive")
-        if type(self.participant_scoped) is not bool or type(self.adopted) is not bool:
+        if (
+            type(self.participant_scoped) is not bool
+            or type(self.adopted) is not bool
+            or type(self.daemon_restart) is not bool
+        ):
             raise TypeError(
-                "participant observation context participant_scoped and adopted must be booleans"
+                "participant observation context participant_scoped, adopted, and daemon_restart "
+                "must be booleans"
             )
         if self.session_provenance is not None and not isinstance(
             self.session_provenance,

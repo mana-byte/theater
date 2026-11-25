@@ -229,12 +229,19 @@ function releaseBridge(lease: symbol): void {
 	if (owners[OWNER] === lease) delete owners[OWNER];
 }
 
-// User-input tools can park a running turn on a human decision.
+// User-input tools and blocking extension UI prompts (confirm/select/input/...)
+// can park a running turn on a human decision.
 const AWAITING_INPUT_TOOLS = new Set(["ask_user_question"]);
 const awaitingToolCalls = new Map<string, string>();
+type PendingInteraction = {
+	readonly kind: "approval" | "clarification";
+	readonly native_turn_id: string | null;
+	readonly details: string;
+};
+let activeUiPrompt: PendingInteraction | null = null;
 
 // The frontend bridge pushes a fresh snapshot whenever the pending
-// interaction changes, so the daemon learns about a question the moment
+// interaction changes, so the daemon learns about a prompt the moment
 // it opens rather than at the next lifecycle event.
 const interactionListeners = new Set<() => void>();
 
@@ -242,23 +249,28 @@ function notifyInteractionChanged(): void {
 	for (const listener of interactionListeners) listener();
 }
 
-function pendingInteractionDescription(): {
-	kind: "clarification";
-	native_turn_id: string | null;
-	details: string;
-} | null {
+function clipInteractionDetails(text: string): string {
+	const line = text.split(/\r?\n/, 1)[0]?.trim() ?? "";
+	return line.length > 200 ? line.slice(0, 200) : line;
+}
+
+function pendingInteractionDescription(): PendingInteraction | null {
+	if (activeUiPrompt !== null) return activeUiPrompt;
 	if (awaitingToolCalls.size === 0) return null;
 	const names = [...awaitingToolCalls.values()].slice(0, 4).join(", ");
 	return {
 		kind: "clarification",
 		native_turn_id: null,
-		details: names.length > 200 ? names.slice(0, 200) : names,
+		details: clipInteractionDetails(names),
 	};
 }
 
 function registerPendingInteractions(pi: ExtensionAPI): void {
-	// Turn boundaries discard questions abandoned without a matching tool result.
-	const clearPendingInteractions = (): void => awaitingToolCalls.clear();
+	// Turn boundaries discard prompts abandoned without a matching end event.
+	const clearPendingInteractions = (): void => {
+		awaitingToolCalls.clear();
+		activeUiPrompt = null;
+	};
 	pi.on("session_start", clearPendingInteractions);
 	pi.on("before_agent_start", clearPendingInteractions);
 	pi.on("agent_start", clearPendingInteractions);
@@ -271,6 +283,29 @@ function registerPendingInteractions(pi: ExtensionAPI): void {
 	});
 	pi.on("tool_result", (event) => {
 		if (!awaitingToolCalls.delete(event.toolCallId)) return;
+		notifyInteractionChanged();
+	});
+	pi.on("ui_prompt_start", (event, ctx) => {
+		// Ignore prompts opened while idle (e.g. slash-command pickers).
+		if (ctx.isIdle()) return;
+		const promptKind = typeof event.kind === "string" ? event.kind : "custom";
+		const title =
+			typeof event.title === "string" && event.title.trim()
+				? event.title
+				: promptKind;
+		activeUiPrompt = {
+			kind:
+				promptKind === "confirm" || promptKind === "select"
+					? "approval"
+					: "clarification",
+			native_turn_id: null,
+			details: clipInteractionDetails(title),
+		};
+		notifyInteractionChanged();
+	});
+	pi.on("ui_prompt_end", () => {
+		if (activeUiPrompt === null) return;
+		activeUiPrompt = null;
 		notifyInteractionChanged();
 	});
 
@@ -867,11 +902,7 @@ interface FrontendSnapshot {
 	};
 	readonly execution_state: FrontendExecutionState;
 	readonly native_turn_id: string | null;
-	readonly pending_interaction: {
-		readonly kind: "clarification";
-		readonly native_turn_id: string | null;
-		readonly details: string;
-	} | null;
+	readonly pending_interaction: PendingInteraction | null;
 	readonly capabilities: {
 		readonly send: boolean;
 		readonly settings_update: boolean;
