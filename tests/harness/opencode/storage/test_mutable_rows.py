@@ -532,3 +532,43 @@ def test_a_failed_compaction_accounts_its_usage_once(rec, workdir):
     assert unbilled.events == [] and not unbilled.trajectory
     seen = [*batch.events, *rewrite.events, *unbilled.events]
     assert sum(e.turn_end for e in seen) == 0
+
+
+def test_session_part_rows_stream_close_and_page_without_message_rewrite(rec, workdir):
+    """OpenCode 2.4+ stores assistant parts in `session_part` with an empty message envelope."""
+    rec.enable_part_rows()
+    src = attached(rec, workdir)
+    note = str(workdir / "note.txt")
+    rec.user("msg_u1", "read the note")
+    first = rec.tick()
+    # Empty envelope on session_message; parts land in session_part without bumping message updated.
+    rec.step("msg_a1", first, [])
+    rec.write_part("msg_a1", 0, tool("call_1", "running", note))
+    first_events = drain(src)
+    assert any(e.kind is EventKind.TOOL_CALL and e.tool_name == "read" for e in first_events)
+
+    # Updating the part row alone must still drain through the live cursor.
+    rec.write_part("msg_a1", 0, tool("call_1", "completed", note, "pamplemousse"))
+    tool_done = drain(src)
+    assert any(e.kind is EventKind.TOOL_RESULT and "pamplemousse" in e.text for e in tool_done)
+    rec.step("msg_a1", first, [], finish="tool-calls", times={"completed": rec.tick()}, **USAGE)
+
+    second = rec.tick()
+    rec.step("msg_a2", second, [])
+    rec.write_part("msg_a2", 0, text("the answer is pamplemousse"))
+    rec.step("msg_a2", second, [], finish="stop", times={"completed": rec.tick()}, **USAGE)
+    rec.idle("msg_i1", "succeeded")
+
+    final_events = drain(src)
+    assert any(e.kind is EventKind.ASSISTANT and "pamplemousse" in e.text for e in final_events)
+    assert sum(e.turn_end for e in final_events) == 1
+
+    # Fresh attachment sees idle status and full history/paged replay from session_part.
+    fresh = OpenCodeSource(rec.path, cwd=str(workdir), session_id=rec.sid)
+    batch = asyncio.run(fresh.read())
+    assert batch.attached is not None and batch.status is Status.IDLE
+    history = asyncio.run(fresh.history(last_n=10))
+    assert any(e.kind is EventKind.ASSISTANT and "pamplemousse" in e.text for e in history.events)
+    page = asyncio.run(fresh.history_page(limit=10))
+    assert page.error_code is None
+    assert any("pamplemousse" in (event.raw_text or "") for event in page.events)

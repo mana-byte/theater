@@ -491,3 +491,103 @@ def test_issue_explanation_has_the_exact_check_and_run(result: Make) -> None:
         run_url=URL,
     )
     assert f"conformance:interrupt (fail): {detail}" in body and URL in body
+
+
+def test_transient_pr_create_error_retries_without_duplicate(
+    repo: Path, result: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("harness_compat.github.publish.time.sleep", lambda _: None)
+    gh = _github(repo)
+    original = gh.__call__
+    failed_once = False
+
+    def flaky(*args: str) -> str:
+        nonlocal failed_once
+        if not failed_once and args[:2] == ("api", "repos/{owner}/{repo}/pulls") and "POST" in args:
+            failed_once = True
+            raise RuntimeError(
+                "gh api repos/{owner}/{repo}/pulls failed: unexpected end of JSON input"
+            )
+        return original(*args)
+
+    published = publish(repo, _run(result("1.3.0")), run_url=URL, gh=flaky, environ=_context(repo))
+    assert failed_once and published.pr == 17 and gh.pr == 17
+
+
+def test_transient_pr_create_error_adopts_pr_already_created_server_side(
+    repo: Path, result: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("harness_compat.github.publish.time.sleep", lambda _: None)
+    gh = _github(repo)
+    original = gh.__call__
+    post_calls = 0
+
+    def flaky_after_create(*args: str) -> str:
+        nonlocal post_calls
+        if args[:2] == ("api", "repos/{owner}/{repo}/pulls") and "POST" in args:
+            post_calls += 1
+            original(*args)
+            raise RuntimeError(
+                "gh api repos/{owner}/{repo}/pulls failed: unexpected end of JSON input"
+            )
+        return original(*args)
+
+    published = publish(
+        repo, _run(result("1.3.0")), run_url=URL, gh=flaky_after_create, environ=_context(repo)
+    )
+    assert post_calls == 1 and published.pr == 17 and gh.pr == 17
+
+
+def test_transient_issue_create_error_adopts_issue_or_retries_without_duplicates(
+    repo: Path, result: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("harness_compat.github.publish.time.sleep", lambda _: None)
+    gh = _github(repo)
+    original = gh.__call__
+    failed_once = False
+
+    def flaky(*args: str) -> str:
+        nonlocal failed_once
+        if (
+            not failed_once
+            and args[:2] == ("api", "repos/{owner}/{repo}/issues")
+            and "POST" in args
+        ):
+            failed_once = True
+            raise RuntimeError(
+                "gh api repos/{owner}/{repo}/issues failed: unexpected end of JSON input"
+            )
+        return original(*args)
+
+    published = publish(
+        repo, _run(result("1.3.0", "red")), run_url=URL, gh=flaky, environ=_context(repo)
+    )
+    assert (
+        failed_once
+        and len(gh.issues) == 1
+        and published.created == (issue_title("claude", "1.3.0"),)
+    )
+
+
+def test_run_gh_retries_transient_reads_but_not_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from harness_compat.github.publish import run_gh
+
+    monkeypatch.setattr("harness_compat.github.publish.time.sleep", lambda _: None)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="unexpected end of JSON input\n")
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("harness_compat.github.publish.subprocess.run", fake_run)
+    assert run_gh("api", "repos/{owner}/{repo}/issues", "--method", "GET") == "{}"
+    assert len(calls) == 2
+
+    calls.clear()
+    with pytest.raises(RuntimeError, match="unexpected end of JSON input"):
+        run_gh("api", "repos/{owner}/{repo}/pulls", "--method", "POST", "--input", "/tmp/x.json")
+    assert len(calls) == 1

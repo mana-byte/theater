@@ -104,6 +104,7 @@ def open_participant_source(
     source_checkpoint: str | None = None,
     pane_pid: int | None = None,
     adopted: bool = False,
+    daemon_restart: bool = True,
 ) -> Source:
     """Compatibility dispatch for the optional participant-aware hook.
 
@@ -121,6 +122,7 @@ def open_participant_source(
         source_checkpoint=source_checkpoint,
         pane_pid=pane_pid,
         adopted=adopted,
+        daemon_restart=daemon_restart,
     )
     if factory := _explicit_context_factory(observer):
         return factory(context)

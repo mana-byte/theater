@@ -21,9 +21,74 @@ _VIEW = "type IN ('user', 'assistant', 'idle', 'compaction')"
 #: Status answers "is a turn in flight"; a compaction never is one, so it stays out.
 _TURN_VIEW = "type IN ('user', 'assistant', 'idle')"
 _COLUMNS = "id, session_id, type, seq, time_updated, data"
+#: Effective row update timestamp when assistant parts live in `session_part` (OpenCode 2.4+).
+_EFFECTIVE_UPDATED = (
+    "MAX(session_message.time_updated, "
+    "COALESCE((SELECT MAX(p.time_updated) FROM session_part p "
+    "WHERE p.message_id = session_message.id), 0))"
+)
+_PART_BATCH_SIZE = 500
 SESSION_TABLE = "session_v2"
 
 type Row = tuple[str, str, str, int, int, str]
+
+
+def _has_part_table(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_part'"
+        ).fetchone()
+        is not None
+    )
+
+
+def _updated_expr(conn: sqlite3.Connection) -> str:
+    return _EFFECTIVE_UPDATED if _has_part_table(conn) else "time_updated"
+
+
+def _with_parts(conn: sqlite3.Connection, rows: list[Row]) -> list[Row]:
+    """Fold `session_part` rows into assistant `data.content` in ordinal order."""
+    if not rows or not _has_part_table(conn):
+        return rows
+    assistant_ids = [row[0] for row in rows if row[2] == "assistant"]
+    if not assistant_ids:
+        return rows
+    parts_by_message: dict[str, list[object]] = {}
+    max_updated: dict[str, int] = {}
+    for start in range(0, len(assistant_ids), _PART_BATCH_SIZE):
+        batch = assistant_ids[start : start + _PART_BATCH_SIZE]
+        placeholders = ",".join("?" for _ in batch)
+        for message_id, updated, raw in conn.execute(
+            "SELECT message_id, time_updated, data FROM session_part "
+            f"WHERE message_id IN ({placeholders}) ORDER BY message_id, ordinal",
+            batch,
+        ).fetchall():
+            try:
+                part = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            parts_by_message.setdefault(message_id, []).append(part)
+            prev = max_updated.get(message_id, 0)
+            if isinstance(updated, int) and updated > prev:
+                max_updated[message_id] = updated
+    if not parts_by_message:
+        return rows
+    merged: list[Row] = []
+    for row in rows:
+        parts = parts_by_message.get(row[0])
+        if not parts:
+            merged.append(row)
+            continue
+        data = load_json_object(row[5])
+        inline = data.get("content")
+        data["content"] = [*parts, *inline] if isinstance(inline, list) else parts
+        updated = max(row[4], max_updated[row[0]])
+        merged.append((row[0], row[1], row[2], row[3], updated, json.dumps(data)))
+    return merged
+
+
+def _with_parts_one(conn: sqlite3.Connection, row: Row | None) -> Row | None:
+    return None if row is None else _with_parts(conn, [row])[0]
 
 
 def row_info(conn: sqlite3.Connection, row: Row) -> dict:
@@ -42,11 +107,12 @@ def row_parts(row: Row) -> list[dict]:
 
 
 def latest_row(conn: sqlite3.Connection, sid: str) -> Row | None:
-    return conn.execute(
+    row = conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_TURN_VIEW} "
         "ORDER BY seq DESC LIMIT 1",
         (sid,),
     ).fetchone()
+    return _with_parts_one(conn, row)
 
 
 def message_role(conn: sqlite3.Connection, message_id: str) -> tuple[object, ...] | None:
@@ -77,8 +143,9 @@ def live_revision_row(
         message_id = found[0] if found is not None else None
     if message_id is None:
         return None
+    updated = _updated_expr(conn)
     return conn.execute(
-        "SELECT time_updated, seq FROM session_message WHERE id = ?", (message_id,)
+        f"SELECT {updated}, seq FROM session_message WHERE id = ?", (message_id,)
     ).fetchone()
 
 
@@ -109,11 +176,14 @@ def history_parts_for_messages(
     if not message_ids:
         return []
     placeholders = ",".join("?" for _ in message_ids)
-    rows = conn.execute(
-        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? "
-        f"AND id IN ({placeholders}) ORDER BY seq",
-        (sid, *message_ids),
-    ).fetchall()
+    rows = _with_parts(
+        conn,
+        conn.execute(
+            f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? "
+            f"AND id IN ({placeholders}) ORDER BY seq",
+            (sid, *message_ids),
+        ).fetchall(),
+    )
     return [(row[0], json.dumps(part)) for row in rows for part in row_parts(row)]
 
 
@@ -141,10 +211,13 @@ def paged_messages(
 def paged_parts(
     conn: sqlite3.Connection, sid: str, message_id: str, limit: int | None
 ) -> list[tuple[str, int, int, str]]:
-    row = conn.execute(
-        f"SELECT {_COLUMNS} FROM session_message WHERE id = ? AND session_id = ?",
-        (message_id, sid),
-    ).fetchone()
+    row = _with_parts_one(
+        conn,
+        conn.execute(
+            f"SELECT {_COLUMNS} FROM session_message WHERE id = ? AND session_id = ?",
+            (message_id, sid),
+        ).fetchone(),
+    )
     if row is None:
         return []
     parts = [(part["id"], row[3], row[4], json.dumps(part)) for part in row_parts(row)]
@@ -163,14 +236,15 @@ def history_boundary(
 
 def head_point(conn: sqlite3.Connection, sid: str) -> tuple[int, int, int]:
     """The newest update instant, the highest seq at that instant, and the message count."""
+    updated = _updated_expr(conn)
     mark, count = conn.execute(
-        "SELECT COALESCE(MAX(time_updated), 0), COUNT(*) FROM session_message "
+        f"SELECT COALESCE(MAX({updated}), 0), COUNT(*) FROM session_message "
         f"WHERE session_id = ? AND {_VIEW}",
         (sid,),
     ).fetchone()
     seq = conn.execute(
         f"SELECT COALESCE(MAX(seq), -1) FROM session_message WHERE session_id = ? AND {_VIEW} "
-        "AND time_updated = ?",
+        f"AND {updated} = ?",
         (sid, mark),
     ).fetchone()[0]
     return int(mark), int(seq), int(count)
@@ -180,13 +254,16 @@ def forward_rows(
     conn: sqlite3.Connection, sid: str, point: tuple[int, int], limit: int
 ) -> list[Row]:
     """Rows strictly after `point` ((time_updated, seq)), oldest update first."""
-    updated, seq = point
-    return conn.execute(
-        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
-        "AND (time_updated > ? OR (time_updated = ? AND seq > ?)) "
-        "ORDER BY time_updated, seq LIMIT ?",
-        (sid, updated, updated, seq, limit),
+    updated_val, seq = point
+    updated = _updated_expr(conn)
+    rows = conn.execute(
+        f"SELECT id, session_id, type, seq, {updated} AS eff_updated, data "
+        f"FROM session_message WHERE session_id = ? AND {_VIEW} "
+        f"AND ({updated} > ? OR ({updated} = ? AND seq > ?)) "
+        f"ORDER BY {updated}, seq LIMIT ?",
+        (sid, updated_val, updated_val, seq, limit),
     ).fetchall()
+    return _with_parts(conn, rows)
 
 
 def reread_rows(
@@ -200,37 +277,43 @@ def reread_rows(
     """One oldest-first page of the window: rows in (cursor, boundary] updated at/after floor."""
     cu, cs = cursor
     bu, bs = boundary
-    return conn.execute(
-        f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} "
-        "AND time_updated >= ? "
-        "AND (time_updated > ? OR (time_updated = ? AND seq > ?)) "
-        "AND (time_updated < ? OR (time_updated = ? AND seq <= ?)) "
-        "ORDER BY time_updated, seq LIMIT ?",
+    updated = _updated_expr(conn)
+    rows = conn.execute(
+        f"SELECT id, session_id, type, seq, {updated} AS eff_updated, data "
+        f"FROM session_message WHERE session_id = ? AND {_VIEW} "
+        f"AND {updated} >= ? "
+        f"AND ({updated} > ? OR ({updated} = ? AND seq > ?)) "
+        f"AND ({updated} < ? OR ({updated} = ? AND seq <= ?)) "
+        f"ORDER BY {updated}, seq LIMIT ?",
         (sid, floor, cu, cu, cs, bu, bu, bs, limit),
     ).fetchall()
+    return _with_parts(conn, rows)
 
 
 def open_turn_rows(conn: sqlite3.Connection, sid: str, *, after_seq: int, limit: int) -> list[Row]:
     """One page after the newest idle marker: the turn still in flight, if any."""
-    return conn.execute(
+    rows = conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} AND seq > "
         "(SELECT COALESCE(MAX(seq), -1) FROM session_message WHERE session_id = ? "
         "AND type = 'idle') AND seq > ? ORDER BY seq LIMIT ?",
         (sid, sid, after_seq, limit),
     ).fetchall()
+    return _with_parts(conn, rows)
 
 
 def _row(conn: sqlite3.Connection, message_id: str) -> Row | None:
-    return conn.execute(
+    row = conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE id = ? AND {_VIEW}", (message_id,)
     ).fetchone()
+    return _with_parts_one(conn, row)
 
 
 def _session_rows(conn: sqlite3.Connection, sid: str) -> list[Row]:
-    return conn.execute(
+    rows = conn.execute(
         f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND {_VIEW} ORDER BY seq",
         (sid,),
     ).fetchall()
+    return _with_parts(conn, rows)
 
 
 def _idle_close(conn: sqlite3.Connection, sid: str, seq: int) -> tuple[bool, dict | None]:
@@ -240,11 +323,14 @@ def _idle_close(conn: sqlite3.Connection, sid: str, seq: int) -> tuple[bool, dic
         "WHERE session_id = ? AND type = 'idle' AND seq < ?",
         (sid, seq),
     ).fetchone()[0]
-    assistant = conn.execute(
-        "SELECT id, data FROM session_message WHERE session_id = ? AND type = 'assistant' "
-        "AND seq > ? AND seq < ? ORDER BY seq DESC LIMIT 1",
-        (sid, previous, seq),
-    ).fetchone()
+    assistant = _with_parts_one(
+        conn,
+        conn.execute(
+            f"SELECT {_COLUMNS} FROM session_message WHERE session_id = ? AND type = 'assistant' "
+            "AND seq > ? AND seq < ? ORDER BY seq DESC LIMIT 1",
+            (sid, previous, seq),
+        ).fetchone(),
+    )
     if assistant is None:
         prompted = conn.execute(
             "SELECT 1 FROM session_message WHERE session_id = ? AND type = 'user' "
@@ -252,7 +338,7 @@ def _idle_close(conn: sqlite3.Connection, sid: str, seq: int) -> tuple[bool, dic
             (sid, previous, seq),
         ).fetchone()
         return translate.idle_closes_turn(None, prompted is not None), None
-    data = load_json_object(assistant[1])
+    data = load_json_object(assistant[5])
     info = translate.message_info(assistant[0], "assistant", sid, data)
     parts = translate.message_parts(assistant[0], "assistant", sid, data)
     return translate.idle_closes_turn((info, parts), True), info.get("stepError")
