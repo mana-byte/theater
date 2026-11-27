@@ -354,7 +354,7 @@ async def test_skill_tools_round_trip_through_the_daemon(mcp_daemon):
         "theater-recover-tmux",
     ]
     assert all("content" not in skill for skill in listed["skills"])
-    hierarchy, pair = listed["plays"]
+    hierarchy, pair, _scout = listed["plays"]
     assert hierarchy["master"] == "hierarchy/master"
     assert hierarchy["disposable"] == ["hierarchy/member"]
     assert [position["name"] for position in hierarchy["positions"]] == [
