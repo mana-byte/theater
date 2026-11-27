@@ -70,11 +70,11 @@ a global default. Do not infer authorization from a scratchpad note.
 ## 2. Track
 
 Survey the code read-only and list the plan's units: for each, the paths it owns, its rough size,
-the symbols it changes and the symbols it consumes. Default heavy; any unknown selects heavy. The
-track is **light** only if all hold: at most 3 units, each one worker's task (none would need a
-lead); pairwise-disjoint paths; no unit consumes a symbol another unit adds, removes or changes
-(else the consumer starts after the producer merges, from the integration branch head, or the track
-is heavy); ACs settled. Name the track and these facts in the validation. Debate (step 3) runs on
+the symbols it changes and the symbols it consumes. Default light; the Upshift rules catch what the
+survey missed. The track is **heavy** only when the survey shows one of: more than 3 units; a unit
+that needs a lead; overlapping paths; a unit that consumes a symbol another unit adds, removes or
+changes and cannot start after the producer merges, from the integration branch head; or ACs that
+are not settled. Name the track and these facts in the validation. Debate (step 3) runs on
 heavy, and on either track whenever a design question is open: two or more viable options that
 differ in behaviour, compatibility, data risk, cost or scope.
 
