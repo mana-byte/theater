@@ -209,6 +209,7 @@ custom skills, so a workflow written once works from any of your agents.
 - `theater-delegate` — hand a task to an existing peer or a builder and reviewer pair.
 - `hierarchy` — a play shipped by the default Beads plugin: a master delegates to members or leads, with a shared task board for milestones, progress, and outcomes.
 - `pair` — a play: a builder and an independent reviewer debate to agreement in a shared worktree.
+- `scout` — a play: a lead fans out cheap read-only readers in parallel and returns merged `path:line` facts.
 
 **Hand a skill to another agent.** Name it in `skills=[...]` on `spawn_session`
 or `send`: Theater appends its instructions after your task, so the receiver

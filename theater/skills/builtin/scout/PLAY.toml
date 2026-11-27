@@ -1,0 +1,7 @@
+description = "Gather code facts fast before you decide, debate or brief children: a lead splits your question into areas, cheap read-only readers map one area each in parallel, and the lead returns merged path:line facts. Use when the answer spans several directories or subsystems. Not for one file or a known symbol: read it yourself. Not inside a live play. Spawn the lead with skills=[\"scout/lead\"], approval=\"yolo\", worktree=true, base_branch=<commit> and response_format={\"$theater\": \"delegate\"}; never load it in your own chat."
+master = "lead"
+disposable = ["reader"]
+
+[positions]
+lead = ["reader"]
+reader = []
