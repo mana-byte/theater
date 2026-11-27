@@ -80,15 +80,11 @@ differ in behaviour, compatibility, data risk, cost or scope.
 
 ## 3. Debate
 
-Load `theater-debate` for its evidence and consensus criteria only; this play replaces its one-peer
-setup and exchange schedule with the rules below. You spawn two debaters (three only for
+Load `theater-debate` and run its blind panel; this play replaces its panel choice and spawn
+settings with the rules below. You spawn two debaters (three only for
 cross-cutting work), each on a model different from yours and the others', with
 `skills=["hierarchy/member", "hierarchy/debater"]`, `worktree=true`, `base_branch=<debate base>`
 (`base`; after an upshift, the integration branch head), `response_format={"$theater": "debate"}`.
-Give all the same neutral brief (requirements, fixed commit, options if known, acceptance criteria,
-paths), never your conclusion. Run three exchanges: independent positions; the other side's evidence
-forwarded unedited, each rebuts or concedes; a verdict on your synthesis. Every claim must cite
-code, a command, a source or a user requirement.
 
 Verify what you rely on: every decision in your report needs a citation you re-checked (`git show
 <debate base>:<path>` or the original source; at most 2 checks per decision plus both sides of each

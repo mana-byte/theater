@@ -203,7 +203,7 @@ Claude Code Opus 5 xhigh as reviewer.
 Every harness connected to Theater can discover and use the same built-in and
 custom skills, so a workflow written once works from any of your agents.
 
-- `theater-debate` — challenge a decision with a second model.
+- `theater-debate` — challenge a decision with a blind panel of other models.
 - `theater-configure` — set up or personalize Theater.
 - `theater-recover-tmux` — recover sessions after a tmux restart.
 - `theater-delegate` — hand a task to an existing peer or a builder and reviewer pair.

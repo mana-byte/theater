@@ -131,6 +131,7 @@ See the [module map](docs/architecture.md#11-module-map) for detail and
 - Keep the smallest test set that proves the behaviour. Remove overlapping
   coverage, but preserve distinct failure, rollback, cancellation, and recovery
   scenarios relevant to the change. The 80% coverage gate still applies.
+- Test code only. Markdown (README, docs, skill and play cards) ships without tests.
 
 ## Invariants — do not break these
 
